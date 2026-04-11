@@ -53,34 +53,36 @@ export class Store {
   }
 
   upsertNode(node: ParsedNode): void {
-    // FTS5 content-sync tables require manual delete-before-reinsert.
-    // We must fetch the ACTUAL old values for the FTS5 delete command.
-    const existing = this.db.prepare(
-      'SELECT rowid, title, content FROM nodes WHERE id = ?'
-    ).get(node.id) as { rowid: number; title: string; content: string } | undefined;
+    this.db.transaction(() => {
+      // FTS5 content-sync tables require manual delete-before-reinsert.
+      // We must fetch the ACTUAL old values for the FTS5 delete command.
+      const existing = this.db.prepare(
+        'SELECT rowid, title, content FROM nodes WHERE id = ?'
+      ).get(node.id) as { rowid: number; title: string; content: string } | undefined;
 
-    if (existing) {
+      if (existing) {
+        this.db.prepare(
+          "INSERT INTO nodes_fts(nodes_fts, rowid, title, content) VALUES('delete', ?, ?, ?)"
+        ).run(existing.rowid, existing.title, existing.content);
+      }
+
+      this.db.prepare(`
+        INSERT INTO nodes (id, title, content, frontmatter)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          title = excluded.title,
+          content = excluded.content,
+          frontmatter = excluded.frontmatter
+      `).run(node.id, node.title, node.content, JSON.stringify(node.frontmatter));
+
+      const row = this.db.prepare(
+        'SELECT rowid FROM nodes WHERE id = ?'
+      ).get(node.id) as { rowid: number };
+
       this.db.prepare(
-        "INSERT INTO nodes_fts(nodes_fts, rowid, title, content) VALUES('delete', ?, ?, ?)"
-      ).run(existing.rowid, existing.title, existing.content);
-    }
-
-    this.db.prepare(`
-      INSERT INTO nodes (id, title, content, frontmatter)
-      VALUES (?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        title = excluded.title,
-        content = excluded.content,
-        frontmatter = excluded.frontmatter
-    `).run(node.id, node.title, node.content, JSON.stringify(node.frontmatter));
-
-    const row = this.db.prepare(
-      'SELECT rowid FROM nodes WHERE id = ?'
-    ).get(node.id) as { rowid: number };
-
-    this.db.prepare(
-      'INSERT INTO nodes_fts(rowid, title, content) VALUES(?, ?, ?)'
-    ).run(row.rowid, node.title, node.content);
+        'INSERT INTO nodes_fts(rowid, title, content) VALUES(?, ?, ?)'
+      ).run(row.rowid, node.title, node.content);
+    })();
   }
 
   getNode(id: string): (ParsedNode & { rowid: number }) | undefined {
@@ -168,22 +170,24 @@ export class Store {
   }
 
   deleteNode(id: string): void {
-    // FTS5 delete requires actual old values, not empty strings
-    const row = this.db.prepare(
-      'SELECT rowid, title, content FROM nodes WHERE id = ?'
-    ).get(id) as { rowid: number; title: string; content: string } | undefined;
+    this.db.transaction(() => {
+      // FTS5 delete requires actual old values, not empty strings
+      const row = this.db.prepare(
+        'SELECT rowid, title, content FROM nodes WHERE id = ?'
+      ).get(id) as { rowid: number; title: string; content: string } | undefined;
 
-    if (row) {
-      this.db.prepare(
-        "INSERT INTO nodes_fts(nodes_fts, rowid, title, content) VALUES('delete', ?, ?, ?)"
-      ).run(row.rowid, row.title, row.content);
-      // sqlite-vec requires BigInt rowids via better-sqlite3
-      this.db.prepare('DELETE FROM nodes_vec WHERE rowid = ?').run(BigInt(row.rowid));
-    }
+      if (row) {
+        this.db.prepare(
+          "INSERT INTO nodes_fts(nodes_fts, rowid, title, content) VALUES('delete', ?, ?, ?)"
+        ).run(row.rowid, row.title, row.content);
+        // sqlite-vec requires BigInt rowids via better-sqlite3
+        this.db.prepare('DELETE FROM nodes_vec WHERE rowid = ?').run(BigInt(row.rowid));
+      }
 
-    this.db.prepare('DELETE FROM nodes WHERE id = ?').run(id);
-    this.db.prepare('DELETE FROM edges WHERE source_id = ? OR target_id = ?').run(id, id);
-    this.db.prepare('DELETE FROM sync WHERE path = ?').run(id);
+      this.db.prepare('DELETE FROM nodes WHERE id = ?').run(id);
+      this.db.prepare('DELETE FROM edges WHERE source_id = ? OR target_id = ?').run(id, id);
+      this.db.prepare('DELETE FROM sync WHERE path = ?').run(id);
+    })();
   }
 
   deleteAllEdgesFrom(nodeId: string): void {
@@ -191,20 +195,32 @@ export class Store {
   }
 
   searchFullText(query: string): SearchResult[] {
-    return this.db.prepare(`
-      SELECT n.id, n.title, rank,
-        snippet(nodes_fts, 1, '>>>', '<<<', '...', 40) as excerpt
-      FROM nodes_fts f
-      JOIN nodes n ON n.rowid = f.rowid
-      WHERE nodes_fts MATCH ?
-      ORDER BY rank
-      LIMIT 20
-    `).all(query).map((r: any) => ({
-      nodeId: r.id,
-      title: r.title,
-      score: -r.rank,
-      excerpt: r.excerpt ?? '',
-    }));
+    const runFts = (q: string) =>
+      this.db.prepare(`
+        SELECT n.id, n.title, rank,
+          snippet(nodes_fts, 1, '>>>', '<<<', '...', 40) as excerpt
+        FROM nodes_fts f
+        JOIN nodes n ON n.rowid = f.rowid
+        WHERE nodes_fts MATCH ?
+        ORDER BY rank
+        LIMIT 20
+      `).all(q).map((r: any) => ({
+        nodeId: r.id,
+        title: r.title,
+        score: -r.rank as number,
+        excerpt: (r.excerpt ?? '') as string,
+      }));
+
+    try {
+      return runFts(query);
+    } catch (e: any) {
+      // FTS5 syntax errors: "unterminated string", "fts5: syntax error", etc.
+      const msg = e.message ?? '';
+      if (msg.includes('fts5') || msg.includes('unterminated') || msg.includes('syntax error')) {
+        return runFts(`"${query.replace(/"/g, '""')}"`);
+      }
+      throw e;
+    }
   }
 
   upsertEmbedding(nodeId: string, embedding: Float32Array): void {

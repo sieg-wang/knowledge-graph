@@ -32,6 +32,17 @@ describe('extractWikiLinks', () => {
     const links = extractWikiLinks('Both [[Alice]] and [[Bob]] agreed on [[Plan]].');
     expect(links).toHaveLength(3);
   });
+
+  it('ignores links inside inline code', () => {
+    const links = extractWikiLinks('Use `[[not a link]]` but [[real link]] works.');
+    expect(links).toEqual([{ raw: 'real link', display: null }]);
+  });
+
+  it('handles empty link gracefully', () => {
+    const links = extractWikiLinks('An empty [[]] link.');
+    // FTS pattern requires at least one char inside, so empty [[]] should not match
+    expect(links).toHaveLength(0);
+  });
 });
 
 describe('buildStemLookup', () => {
@@ -67,5 +78,20 @@ describe('resolveLink', () => {
 
   it('returns null for unresolvable links (stub nodes)', () => {
     expect(resolveLink('Nonexistent Page', lookup)).toBeNull();
+  });
+
+  it('resolves ambiguous stem with path hint', () => {
+    const paths = ['Dir1/Shared.md', 'Dir2/Shared.md'];
+    const ambigLookup = buildStemLookup(paths);
+    expect(resolveLink('Dir1/Shared', ambigLookup)).toBe('Dir1/Shared.md');
+    expect(resolveLink('Dir2/Shared', ambigLookup)).toBe('Dir2/Shared.md');
+  });
+
+  it('falls back to first match for ambiguous bare name', () => {
+    const paths = ['Dir1/Shared.md', 'Dir2/Shared.md'];
+    const ambigLookup = buildStemLookup(paths);
+    // Should pick first (with console.warn) rather than returning null
+    const result = resolveLink('Shared', ambigLookup);
+    expect(result).toBe('Dir1/Shared.md');
   });
 });

@@ -54,4 +54,14 @@ describe('parseVault', () => {
     expect(bob.frontmatter.inline_tags).toContain('research');
     expect(bob.frontmatter.inline_tags).toContain('published');
   });
+
+  it('handles malformed frontmatter gracefully', async () => {
+    const { nodes } = await parseVault(FIXTURE_VAULT);
+    const bad = nodes.find(n => n.id === 'bad-frontmatter.md')!;
+    expect(bad).toBeDefined();
+    // Falls back to filename as title
+    expect(bad.title).toBe('bad-frontmatter');
+    // Content should contain the raw file content
+    expect(bad.content).toContain('Bad Frontmatter');
+  });
 });

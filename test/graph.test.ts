@@ -94,4 +94,57 @@ describe('KnowledgeGraph', () => {
     const cScore = scores.get('c.md') ?? 0;
     expect(cScore).toBeGreaterThan(dScore);
   });
+
+  it('neighbors returns empty for nonexistent node', () => {
+    const neighbors = kg.neighbors('nonexistent.md', 1);
+    expect(neighbors).toHaveLength(0);
+  });
+
+  it('findPaths returns empty for nonexistent nodes', () => {
+    const paths = kg.findPaths('nonexistent.md', 'a.md', 3);
+    expect(paths).toHaveLength(0);
+  });
+
+  it('findPaths with same source and target returns empty', () => {
+    const paths = kg.findPaths('a.md', 'a.md', 3);
+    // DFS starts at source, immediately matches target → returns the trivial path
+    expect(paths).toHaveLength(1);
+    expect(paths[0].nodes).toEqual(['a.md']);
+    expect(paths[0].length).toBe(0);
+  });
+
+  it('commonNeighbors returns empty when no overlap', () => {
+    // A and D share no neighbors (D is isolated)
+    const common = kg.commonNeighbors('a.md', 'd.md');
+    expect(common).toHaveLength(0);
+  });
+
+  it('commonNeighbors returns empty for nonexistent node', () => {
+    const common = kg.commonNeighbors('a.md', 'nonexistent.md');
+    expect(common).toHaveLength(0);
+  });
+
+  it('subgraph of isolated node contains only itself', () => {
+    const sub = kg.subgraph('d.md', 1);
+    expect(sub.nodes).toHaveLength(1);
+    expect(sub.nodes[0].id).toBe('d.md');
+    expect(sub.edges).toHaveLength(0);
+  });
+
+  it('centralNodes filters by community node IDs', () => {
+    const central = kg.centralNodes(10, ['a.md', 'b.md']);
+    const ids = central.map(n => n.id);
+    expect(ids).not.toContain('c.md');
+    expect(ids).not.toContain('d.md');
+  });
+
+  it('bridges returns empty for a fully isolated graph', () => {
+    const isolatedStore = new Store(':memory:');
+    isolatedStore.upsertNode({ id: 'x.md', title: 'X', content: '', frontmatter: {} });
+    isolatedStore.upsertNode({ id: 'y.md', title: 'Y', content: '', frontmatter: {} });
+    const isolatedKg = KnowledgeGraph.fromStore(isolatedStore);
+    const bridges = isolatedKg.bridges(10);
+    expect(bridges.every(b => b.score === 0)).toBe(true);
+    isolatedStore.close();
+  });
 });

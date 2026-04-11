@@ -31,6 +31,14 @@ export class IndexPipeline {
     const { nodes, edges, stubIds } = await parseVault(vaultPath);
     const previousPaths = this.store.getAllSyncPaths();
 
+    // Pre-group edges by source for O(1) lookup
+    const edgesBySource = new Map<string, typeof edges>();
+    for (const edge of edges) {
+      const list = edgesBySource.get(edge.sourceId) ?? [];
+      list.push(edge);
+      edgesBySource.set(edge.sourceId, list);
+    }
+
     // Detect deleted files
     const currentPaths = new Set(nodes.map(n => n.id));
     for (const oldPath of previousPaths) {
@@ -60,7 +68,7 @@ export class IndexPipeline {
 
       // Re-index edges from this node
       this.store.deleteAllEdgesFrom(node.id);
-      for (const edge of edges.filter(e => e.sourceId === node.id)) {
+      for (const edge of edgesBySource.get(node.id) ?? []) {
         this.store.insertEdge(edge);
         stats.edgesIndexed++;
       }
