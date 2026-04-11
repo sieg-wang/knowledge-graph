@@ -11,14 +11,6 @@ export interface ParsedEdge {
   context: string;      // enclosing paragraph
 }
 
-export interface StoredNode extends ParsedNode {
-  embedding: Float32Array | null;
-}
-
-export interface StoredEdge extends ParsedEdge {
-  id: number;
-}
-
 export interface Community {
   id: number;
   label: string;

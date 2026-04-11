@@ -6,7 +6,7 @@ import { Embedder } from '../lib/embedder.js';
 import { IndexPipeline } from '../lib/index-pipeline.js';
 import { KnowledgeGraph } from '../lib/graph.js';
 import { Search } from '../lib/search.js';
-import { resolveNodeName } from '../lib/resolve.js';
+import { requireMatch } from '../lib/resolve.js';
 
 const program = new Command();
 
@@ -36,16 +36,12 @@ function output(data: unknown) {
 }
 
 function requireSingleMatch(name: string, store: Store): string {
-  const matches = resolveNodeName(name, store);
-  if (matches.length === 0) {
-    console.error(`No node found matching "${name}"`);
+  try {
+    return requireMatch(name, store);
+  } catch (e: any) {
+    console.error(e.message);
     process.exit(1);
   }
-  if (matches.length > 1 && matches[0].matchType !== 'exact' && matches[0].matchType !== 'id') {
-    output({ ambiguous: true, hint: 'Use the full node ID to disambiguate', candidates: matches });
-    process.exit(1);
-  }
-  return matches[0].nodeId;
 }
 
 program
