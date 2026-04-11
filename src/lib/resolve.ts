@@ -1,6 +1,25 @@
 import type { Store } from './store.js';
 import type { NameMatch } from './types.js';
 
+/**
+ * Resolve a node name to a single ID, throwing on no match or ambiguity.
+ * Used by MCP tool handlers as the entry point for all fuzzy name resolution.
+ */
+export function requireMatch(name: string, store: Store): string {
+  const matches = resolveNodeName(name, store);
+  if (matches.length === 0) throw new Error(`No node found matching "${name}"`);
+  if (
+    matches.length > 1
+    && matches[0].matchType !== 'exact'
+    && matches[0].matchType !== 'id'
+    && matches[0].matchType !== 'case-insensitive'
+  ) {
+    const candidates = matches.map(m => `"${m.title}" (${m.nodeId})`).join(', ');
+    throw new Error(`Ambiguous name "${name}". Candidates: ${candidates}. Use the full node ID to disambiguate.`);
+  }
+  return matches[0].nodeId;
+}
+
 export function resolveNodeName(name: string, store: Store): NameMatch[] {
   const allNodes = store.db.prepare(
     'SELECT id, title, frontmatter FROM nodes'

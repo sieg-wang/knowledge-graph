@@ -1,20 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { Store } from '../src/lib/store.js';
-import { resolveNodeName } from '../src/lib/resolve.js';
-
-/**
- * Mirrors the requireMatch helper from src/mcp/index.ts.
- * Tests the disambiguation logic used by all MCP tool handlers.
- */
-function requireMatch(name: string, store: Store): string {
-  const matches = resolveNodeName(name, store);
-  if (matches.length === 0) throw new Error(`No node found matching "${name}"`);
-  if (matches.length > 1 && matches[0].matchType !== 'exact' && matches[0].matchType !== 'id') {
-    const candidates = matches.map(m => `"${m.title}" (${m.nodeId})`).join(', ');
-    throw new Error(`Ambiguous name "${name}". Candidates: ${candidates}. Use the full node ID to disambiguate.`);
-  }
-  return matches[0].nodeId;
-}
+import { resolveNodeName, requireMatch } from '../src/lib/resolve.js';
 
 describe('requireMatch (MCP disambiguation)', () => {
   let store: Store;
@@ -59,12 +45,20 @@ describe('requireMatch (MCP disambiguation)', () => {
   });
 
   it('does not throw on multi-result exact match', () => {
-    // Two nodes with the same exact title: returns first without error
     store.upsertNode({
       id: 'dup.md', title: 'Alice Smith',
       content: '', frontmatter: {},
     });
     expect(requireMatch('Alice Smith', store)).toBe('People/Alice Smith.md');
+  });
+
+  it('does not throw on case-insensitive multi-match', () => {
+    store.upsertNode({
+      id: 'lower.md', title: 'widget theory',
+      content: '', frontmatter: {},
+    });
+    // "widget theory" matches both via case-insensitive — should pick first, not throw
+    expect(() => requireMatch('widget theory', store)).not.toThrow();
   });
 });
 

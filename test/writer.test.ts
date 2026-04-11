@@ -178,5 +178,34 @@ describe('VaultWriter', () => {
       const edges = store.getEdgesFrom('Source.md');
       expect(edges.some(e => e.targetId === 'Unknown Target.md')).toBe(true);
     });
+
+    it('preserves .md extension in fallback for unknown targets', () => {
+      writer.createNode({
+        title: 'Source',
+        frontmatter: {},
+        content: 'Some content.',
+      });
+
+      writer.addLink('Source.md', 'Unknown.md', 'Link context.');
+
+      const edges = store.getEdgesFrom('Source.md');
+      expect(edges.some(e => e.targetId === 'Unknown.md')).toBe(true);
+    });
+
+    it('picks first match when target resolves ambiguously', () => {
+      writer.createNode({
+        title: 'Source',
+        frontmatter: {},
+        content: 'Some content.',
+      });
+      store.upsertNode({ id: 'a.md', title: 'Alpha Smith', content: '', frontmatter: {} });
+      store.upsertNode({ id: 'b.md', title: 'Beta Smith', content: '', frontmatter: {} });
+
+      // Should pick first substring match without throwing
+      writer.addLink('Source.md', 'Smith', 'Linked to Smith.');
+
+      const edges = store.getEdgesFrom('Source.md');
+      expect(edges.length).toBeGreaterThan(0);
+    });
   });
 });
