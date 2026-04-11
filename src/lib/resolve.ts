@@ -50,8 +50,9 @@ export function resolveNodeName(name: string, store: Store): NameMatch[] {
   // Priority 3: alias match
   const aliasMatches: NameMatch[] = [];
   for (const n of allNodes) {
-    const fm = JSON.parse(n.frontmatter);
-    const aliases: string[] = fm.aliases ?? [];
+    let fm: Record<string, unknown>;
+    try { fm = JSON.parse(n.frontmatter); } catch { fm = {}; }
+    const aliases: string[] = fm.aliases as string[] ?? [];
     if (aliases.some(a => a.toLowerCase() === lower)) {
       aliasMatches.push({ nodeId: n.id, title: n.title, matchType: 'alias' });
     }

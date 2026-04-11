@@ -60,6 +60,15 @@ describe('requireMatch (MCP disambiguation)', () => {
     // "widget theory" matches both via case-insensitive — should pick first, not throw
     expect(() => requireMatch('widget theory', store)).not.toThrow();
   });
+
+  it('throws on ambiguous alias match', () => {
+    store.upsertNode({
+      id: 'other.md', title: 'Other',
+      content: '', frontmatter: { aliases: ['A. Smith'] },
+    });
+    // "A. Smith" matches both Alice Smith and Other via alias
+    expect(() => requireMatch('A. Smith', store)).toThrow('Ambiguous');
+  });
 });
 
 describe('resolveNodeName', () => {

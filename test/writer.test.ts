@@ -207,5 +207,9 @@ describe('VaultWriter', () => {
       const edges = store.getEdgesFrom('Source.md');
       expect(edges.length).toBeGreaterThan(0);
     });
+
+    it('throws if source node file does not exist', () => {
+      expect(() => writer.addLink('nonexistent.md', 'target', 'context')).toThrow(/not found/);
+    });
   });
 });
