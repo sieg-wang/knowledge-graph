@@ -19,6 +19,14 @@ const embedder = new Embedder();
 const search = new Search(store, embedder);
 const writer = new VaultWriter(config.vaultPath, store);
 let embedderReady = false;
+let cachedGraph: KnowledgeGraph | null = null;
+
+function getGraph(): KnowledgeGraph {
+  if (!cachedGraph) {
+    cachedGraph = KnowledgeGraph.fromStore(store);
+  }
+  return cachedGraph;
+}
 
 const server = new McpServer({
   name: 'knowledge-graph',
@@ -43,6 +51,7 @@ server.tool(
     if (!embedderReady) { await embedder.init(); embedderReady = true; }
     const pipeline = new IndexPipeline(store, embedder);
     const stats = await pipeline.index(config.vaultPath, resolution ?? 1.0);
+    cachedGraph = null; // Invalidate — graph structure changed
     return { content: [{ type: 'text', text: JSON.stringify(stats, null, 2) }] };
   }
 );
@@ -101,7 +110,7 @@ server.tool(
   },
   async ({ name, depth }) => {
     const nodeId = requireMatch(name);
-    const kg = KnowledgeGraph.fromStore(store);
+    const kg = getGraph();
     const neighbors = kg.neighbors(nodeId, depth ?? 1);
     return { content: [{ type: 'text', text: JSON.stringify(neighbors, null, 2) }] };
   }
@@ -138,7 +147,7 @@ server.tool(
   async ({ from, to, maxDepth }) => {
     const fromId = requireMatch(from);
     const toId = requireMatch(to);
-    const kg = KnowledgeGraph.fromStore(store);
+    const kg = getGraph();
     const paths = kg.findPaths(fromId, toId, maxDepth ?? 3);
     return { content: [{ type: 'text', text: JSON.stringify(paths, null, 2) }] };
   }
@@ -154,7 +163,7 @@ server.tool(
   async ({ nodeA, nodeB }) => {
     const idA = requireMatch(nodeA);
     const idB = requireMatch(nodeB);
-    const kg = KnowledgeGraph.fromStore(store);
+    const kg = getGraph();
     const common = kg.commonNeighbors(idA, idB);
     return { content: [{ type: 'text', text: JSON.stringify(common, null, 2) }] };
   }
@@ -169,7 +178,7 @@ server.tool(
   },
   async ({ name, depth }) => {
     const nodeId = requireMatch(name);
-    const kg = KnowledgeGraph.fromStore(store);
+    const kg = getGraph();
     const sub = kg.subgraph(nodeId, depth ?? 1);
     return { content: [{ type: 'text', text: JSON.stringify(sub, null, 2) }] };
   }
@@ -206,7 +215,7 @@ server.tool(
   'Find bridge nodes with highest betweenness centrality',
   { limit: z.number().optional().describe('Max results (default 20)') },
   async ({ limit }) => {
-    const kg = KnowledgeGraph.fromStore(store);
+    const kg = getGraph();
     const bridges = kg.bridges(limit ?? 20);
     return { content: [{ type: 'text', text: JSON.stringify(bridges, null, 2) }] };
   }
@@ -220,7 +229,7 @@ server.tool(
     limit: z.number().optional().describe('Max results (default 20)'),
   },
   async ({ community, limit }) => {
-    const kg = KnowledgeGraph.fromStore(store);
+    const kg = getGraph();
     let communityNodeIds: string[] | undefined;
     if (community) {
       const communities = store.getAllCommunities();
@@ -248,6 +257,7 @@ server.tool(
       frontmatter: frontmatter ?? {},
       content,
     });
+    cachedGraph = null;
     return { content: [{ type: 'text', text: JSON.stringify({ created: relPath }, null, 2) }] };
   }
 );
@@ -262,6 +272,7 @@ server.tool(
   async ({ name, content }) => {
     const nodeId = requireMatch(name);
     writer.annotateNode(nodeId, content);
+    cachedGraph = null;
     return { content: [{ type: 'text', text: JSON.stringify({ annotated: nodeId }, null, 2) }] };
   }
 );
@@ -277,6 +288,7 @@ server.tool(
   async ({ source, target, context }) => {
     const sourceId = requireMatch(source);
     writer.addLink(sourceId, target, context);
+    cachedGraph = null;
     return { content: [{ type: 'text', text: JSON.stringify({ linked: { from: sourceId, to: target } }, null, 2) }] };
   }
 );

@@ -144,5 +144,39 @@ describe('VaultWriter', () => {
       const edges = store.getEdgesFrom('Source.md');
       expect(edges.some(e => e.targetId === 'People/Alice Smith.md')).toBe(true);
     });
+
+    it('resolves target by title to full node ID', () => {
+      writer.createNode({
+        title: 'Source',
+        frontmatter: {},
+        content: 'Some content.',
+      });
+      // Pre-seed the target in the store (fixture already has the file on disk)
+      store.upsertNode({
+        id: 'Concepts/Widget Theory.md',
+        title: 'Widget Theory',
+        content: 'A concept.',
+        frontmatter: {},
+      });
+
+      // Link by title only — should resolve to "Concepts/Widget Theory.md"
+      writer.addLink('Source.md', 'Widget Theory', 'Uses widget theory.');
+
+      const edges = store.getEdgesFrom('Source.md');
+      expect(edges.some(e => e.targetId === 'Concepts/Widget Theory.md')).toBe(true);
+    });
+
+    it('falls back to naive .md append for unknown targets', () => {
+      writer.createNode({
+        title: 'Source',
+        frontmatter: {},
+        content: 'Some content.',
+      });
+
+      writer.addLink('Source.md', 'Unknown Target', 'Linked to unknown.');
+
+      const edges = store.getEdgesFrom('Source.md');
+      expect(edges.some(e => e.targetId === 'Unknown Target.md')).toBe(true);
+    });
   });
 });

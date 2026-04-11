@@ -2,6 +2,72 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { Store } from '../src/lib/store.js';
 import { resolveNodeName } from '../src/lib/resolve.js';
 
+/**
+ * Mirrors the requireMatch helper from src/mcp/index.ts.
+ * Tests the disambiguation logic used by all MCP tool handlers.
+ */
+function requireMatch(name: string, store: Store): string {
+  const matches = resolveNodeName(name, store);
+  if (matches.length === 0) throw new Error(`No node found matching "${name}"`);
+  if (matches.length > 1 && matches[0].matchType !== 'exact' && matches[0].matchType !== 'id') {
+    const candidates = matches.map(m => `"${m.title}" (${m.nodeId})`).join(', ');
+    throw new Error(`Ambiguous name "${name}". Candidates: ${candidates}. Use the full node ID to disambiguate.`);
+  }
+  return matches[0].nodeId;
+}
+
+describe('requireMatch (MCP disambiguation)', () => {
+  let store: Store;
+
+  beforeEach(() => {
+    store = new Store(':memory:');
+    store.upsertNode({
+      id: 'People/Alice Smith.md', title: 'Alice Smith',
+      content: '', frontmatter: { aliases: ['A. Smith'] },
+    });
+    store.upsertNode({
+      id: 'Concepts/Widget Theory.md', title: 'Widget Theory',
+      content: '', frontmatter: {},
+    });
+    store.upsertNode({
+      id: 'smith2.md', title: 'John Smith',
+      content: '', frontmatter: {},
+    });
+  });
+
+  afterEach(() => store.close());
+
+  it('resolves exact title match', () => {
+    expect(requireMatch('Alice Smith', store)).toBe('People/Alice Smith.md');
+  });
+
+  it('resolves alias match', () => {
+    expect(requireMatch('A. Smith', store)).toBe('People/Alice Smith.md');
+  });
+
+  it('resolves by node ID', () => {
+    expect(requireMatch('Concepts/Widget Theory.md', store)).toBe('Concepts/Widget Theory.md');
+  });
+
+  it('throws on no match', () => {
+    expect(() => requireMatch('Nonexistent', store)).toThrow('No node found');
+  });
+
+  it('throws on ambiguous substring match', () => {
+    // "Smith" matches both "Alice Smith" and "John Smith" via substring
+    expect(() => requireMatch('Smith', store)).toThrow('Ambiguous');
+  });
+
+  it('does not throw on multi-result exact match', () => {
+    // Two nodes with the same exact title: returns first without error
+    store.upsertNode({
+      id: 'dup.md', title: 'Alice Smith',
+      content: '', frontmatter: {},
+    });
+    expect(requireMatch('Alice Smith', store)).toBe('People/Alice Smith.md');
+  });
+});
+
 describe('resolveNodeName', () => {
   let store: Store;
 
@@ -71,5 +137,33 @@ describe('resolveNodeName', () => {
   it('prefers ID match over title match', () => {
     const matches = resolveNodeName('People/Alice Smith.md', store);
     expect(matches[0].matchType).toBe('id');
+  });
+
+  it('matches any of multiple aliases', () => {
+    const m1 = resolveNodeName('Widget Framework', store);
+    expect(m1).toHaveLength(1);
+    expect(m1[0].matchType).toBe('alias');
+    expect(m1[0].nodeId).toBe('Concepts/Widget Theory.md');
+
+    const m2 = resolveNodeName('A. Smith', store);
+    expect(m2).toHaveLength(1);
+    expect(m2[0].matchType).toBe('alias');
+    expect(m2[0].nodeId).toBe('People/Alice Smith.md');
+  });
+
+  it('alias match is case-insensitive', () => {
+    const matches = resolveNodeName('wt', store);
+    expect(matches).toHaveLength(1);
+    expect(matches[0].matchType).toBe('alias');
+  });
+
+  it('substring match returns multiple results', () => {
+    store.upsertNode({
+      id: 'smith2.md', title: 'John Smith',
+      content: '', frontmatter: {},
+    });
+    const matches = resolveNodeName('Smith', store);
+    expect(matches.length).toBeGreaterThanOrEqual(2);
+    expect(matches.every(m => m.matchType === 'substring')).toBe(true);
   });
 });

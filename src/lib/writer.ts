@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } fr
 import { join, basename } from 'path';
 import matter from 'gray-matter';
 import type { Store } from './store.js';
+import { resolveNodeName } from './resolve.js';
 
 export interface CreateNodeOptions {
   title: string;
@@ -64,8 +65,11 @@ export class VaultWriter {
     // Re-index source node
     this.indexFile(sourceId);
 
-    // Add edge to store
-    const targetId = targetRef.endsWith('.md') ? targetRef : targetRef + '.md';
+    // Resolve target to actual node ID, fall back to naive .md append for stubs
+    const matches = resolveNodeName(targetRef, this.store);
+    const targetId = matches.length > 0
+      ? matches[0].nodeId
+      : (targetRef.endsWith('.md') ? targetRef : targetRef + '.md');
     this.store.insertEdge({
       sourceId,
       targetId,
