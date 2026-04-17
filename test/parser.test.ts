@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest';
+import { mkdtempSync, writeFileSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
 import { join } from 'path';
 import { parseVault } from '../src/lib/parser.js';
 
@@ -63,5 +65,31 @@ describe('parseVault', () => {
     expect(bad.title).toBe('bad-frontmatter');
     // Content should contain the raw file content
     expect(bad.content).toContain('Bad Frontmatter');
+  });
+
+  // Regression: YAML frontmatter is user-authored. A payload like
+  // `__proto__: { polluted: true }` would flow through Store.upsertNode and
+  // downstream object-spread sites, mutating Object.prototype for the whole
+  // process. sanitizeFrontmatter drops the three dangerous keys.
+  it('strips prototype-pollution keys from frontmatter', async () => {
+    const tmpVault = mkdtempSync(join(tmpdir(), 'kg-parser-proto-'));
+    try {
+      writeFileSync(
+        join(tmpVault, 'evil.md'),
+        '---\n__proto__:\n  polluted: true\nconstructor:\n  evil: 1\nprototype:\n  x: 1\ntitle: Evil\n---\nbody\n',
+        'utf-8',
+      );
+      const { nodes } = await parseVault(tmpVault);
+      const evil = nodes.find(n => n.id === 'evil.md')!;
+      expect(evil).toBeDefined();
+      expect(evil.title).toBe('Evil');
+      expect(Object.prototype.hasOwnProperty.call(evil.frontmatter, '__proto__')).toBe(false);
+      expect(Object.prototype.hasOwnProperty.call(evil.frontmatter, 'constructor')).toBe(false);
+      expect(Object.prototype.hasOwnProperty.call(evil.frontmatter, 'prototype')).toBe(false);
+      // Crucially, Object.prototype is not polluted.
+      expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+    } finally {
+      rmSync(tmpVault, { recursive: true, force: true });
+    }
   });
 });

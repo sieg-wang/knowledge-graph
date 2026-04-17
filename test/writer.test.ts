@@ -86,6 +86,77 @@ describe('VaultWriter', () => {
         content: 'Duplicate.',
       })).toThrow(/already exists/);
     });
+
+    // Regression: title comes from LLM/CLI input. Previously a title of
+    // `../../etc/passwd` or `Foo/Bar` silently wrote outside the vault or
+    // into an unintended subdirectory.
+    it('rejects a title with a forward slash', () => {
+      expect(() => writer.createNode({
+        title: 'foo/bar',
+        frontmatter: {},
+        content: 'x',
+      })).toThrow(/Unsafe title/);
+    });
+
+    it('rejects a title with a backslash', () => {
+      expect(() => writer.createNode({
+        title: 'foo\\bar',
+        frontmatter: {},
+        content: 'x',
+      })).toThrow(/Unsafe title/);
+    });
+
+    it('rejects a title equal to ".." (parent directory)', () => {
+      expect(() => writer.createNode({
+        title: '..',
+        frontmatter: {},
+        content: 'x',
+      })).toThrow(/Unsafe title/);
+    });
+
+    it('rejects a title with control characters', () => {
+      expect(() => writer.createNode({
+        title: 'foo\x00bar',
+        frontmatter: {},
+        content: 'x',
+      })).toThrow(/Unsafe title/);
+    });
+
+    it('rejects an empty title', () => {
+      expect(() => writer.createNode({
+        title: '',
+        frontmatter: {},
+        content: 'x',
+      })).toThrow(/Unsafe title/);
+    });
+
+    it('rejects a directory containing "../"', () => {
+      expect(() => writer.createNode({
+        title: 'Ok',
+        directory: '../escape',
+        frontmatter: {},
+        content: 'x',
+      })).toThrow(/Unsafe directory/);
+    });
+
+    it('rejects an absolute directory', () => {
+      expect(() => writer.createNode({
+        title: 'Ok',
+        directory: '/etc',
+        frontmatter: {},
+        content: 'x',
+      })).toThrow(/Unsafe directory/);
+    });
+
+    it('still accepts a nested directory path without parent refs', () => {
+      writer.createNode({
+        title: 'Inside',
+        directory: 'a/b/c',
+        frontmatter: {},
+        content: 'nested ok',
+      });
+      expect(existsSync(join(tempVault, 'a', 'b', 'c', 'Inside.md'))).toBe(true);
+    });
   });
 
   describe('annotateNode', () => {

@@ -147,4 +147,26 @@ describe('KnowledgeGraph', () => {
     expect(bridges.every(b => b.score === 0)).toBe(true);
     isolatedStore.close();
   });
+
+  // Regression: DFS was unbounded. On a dense graph with a hub node, maxDepth=3
+  // could enumerate millions of paths and OOM the MCP process. The cap makes
+  // the return bounded and still useful.
+  it('findPaths caps the number of returned paths', () => {
+    const denseStore = new Store(':memory:');
+    // Hub node + 20 leaves, each leaf connects back to the hub's twin target.
+    denseStore.upsertNode({ id: 'hub.md', title: 'Hub', content: '', frontmatter: {} });
+    denseStore.upsertNode({ id: 'end.md', title: 'End', content: '', frontmatter: {} });
+    for (let i = 0; i < 20; i++) {
+      const id = `leaf${i}.md`;
+      denseStore.upsertNode({ id, title: `Leaf${i}`, content: '', frontmatter: {} });
+      denseStore.insertEdge({ sourceId: 'hub.md', targetId: id, context: '' });
+      denseStore.insertEdge({ sourceId: id, targetId: 'end.md', context: '' });
+    }
+    const denseKg = KnowledgeGraph.fromStore(denseStore);
+    // With maxPaths=5, even though 20 hub→leaf→end paths exist, we get at most 5.
+    const paths = denseKg.findPaths('hub.md', 'end.md', 3, 5);
+    expect(paths.length).toBeLessThanOrEqual(5);
+    expect(paths.length).toBeGreaterThan(0);
+    denseStore.close();
+  });
 });

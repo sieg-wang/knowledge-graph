@@ -32,10 +32,15 @@ export async function parseVault(vaultPath: string): Promise<ParseResult> {
     let content: string;
     try {
       const parsed = matter(raw);
-      fm = parsed.data;
-      content = parsed.content;
+      // gray-matter usually absorbs YAML errors internally and still returns
+      // { data: {}, content: ... } — the catch branch below is a last
+      // resort. More importantly, frontmatter is user-authored YAML, so
+      // strip the three prototype-pollution keys before letting it flow
+      // through the indexer (where it reaches Store.upsertNode and later
+      // spreads in other objects).
+      fm = sanitizeFrontmatter(parsed.data);
+      content = parsed.content ?? raw;
     } catch {
-      // Malformed YAML frontmatter — treat entire file as content
       console.warn(`Malformed frontmatter in ${relPath}, treating as plain markdown`);
       fm = {};
       content = raw;
@@ -76,6 +81,20 @@ export async function parseVault(vaultPath: string): Promise<ParseResult> {
   }
 
   return { nodes, edges, stubIds };
+}
+
+// Strip the three keys that can mutate Object.prototype when assigned via
+// bracket notation anywhere downstream. We keep a plain object (rather than
+// Object.create(null)) because downstream callers rely on standard object
+// spreading and JSON.stringify, which work with plain objects.
+function sanitizeFrontmatter(data: unknown): Record<string, unknown> {
+  if (!data || typeof data !== 'object') return {};
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(data as Record<string, unknown>)) {
+    if (key === '__proto__' || key === 'constructor' || key === 'prototype') continue;
+    out[key] = value;
+  }
+  return out;
 }
 
 function extractInlineTags(content: string): string[] {

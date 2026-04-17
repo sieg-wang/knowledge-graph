@@ -117,10 +117,10 @@ export class KnowledgeGraph {
     return result;
   }
 
-  findPaths(fromId: string, toId: string, maxDepth: number): PathResult[] {
+  findPaths(fromId: string, toId: string, maxDepth: number, maxPaths: number = 1000): PathResult[] {
     if (!this.graph.hasNode(fromId) || !this.graph.hasNode(toId)) return [];
     const undirected = this.toUndirected();
-    const rawPaths = findAllSimplePaths(undirected, fromId, toId, maxDepth);
+    const rawPaths = findAllSimplePaths(undirected, fromId, toId, maxDepth, maxPaths);
 
     return rawPaths.map(nodePath => {
       const edges: PathResult['edges'] = [];
@@ -293,30 +293,38 @@ function findAllSimplePaths(
   from: string,
   to: string,
   maxDepth: number,
+  maxPaths: number,
 ): string[][] {
   const results: string[][] = [];
 
+  // Hard cap on result count. On a dense graph with a 500-neighbor hub and
+  // maxDepth≥3, DFS can enumerate millions of paths before the depth cut-off
+  // fires, OOMing the MCP process. Abort the recursion as soon as the cap is
+  // hit so we return a bounded, useful answer instead of crashing.
   function dfs(
     current: string,
     target: string,
     path: string[],
     visited: Set<string>,
     depth: number,
-  ) {
+  ): boolean {
+    if (results.length >= maxPaths) return true;
     if (current === target) {
       results.push([...path]);
-      return;
+      return results.length >= maxPaths;
     }
-    if (depth >= maxDepth) return;
+    if (depth >= maxDepth) return false;
     for (const neighbor of graph.neighbors(current)) {
       if (!visited.has(neighbor)) {
         visited.add(neighbor);
         path.push(neighbor);
-        dfs(neighbor, target, path, visited, depth + 1);
+        const hit = dfs(neighbor, target, path, visited, depth + 1);
         path.pop();
         visited.delete(neighbor);
+        if (hit) return true;
       }
     }
+    return false;
   }
 
   const visited = new Set([from]);

@@ -11,6 +11,44 @@ export interface CreateNodeOptions {
   content: string;
 }
 
+// Titles and directories reach createNode from MCP tool input (LLM-controlled)
+// and from CLI users. Reject filesystem separators and control chars so a
+// hostile or buggy caller cannot write outside the vault or overwrite arbitrary
+// files. The set intentionally mirrors Windows + POSIX reserved chars so the
+// same vault works on any host.
+//
+// Exported for unit tests; internal callers should use createNode/addLink.
+export const INVALID_TITLE_CHARS = /[\x00-\x1f/\\:*?"<>|]/;
+
+function assertSafeTitle(title: string): void {
+  if (!title || INVALID_TITLE_CHARS.test(title)) {
+    throw new Error(
+      `Unsafe title: ${JSON.stringify(title)} — contains path separator, control char, or reserved character`,
+    );
+  }
+  if (title === '.' || title === '..') {
+    throw new Error(`Unsafe title: "${title}" is a filesystem reference`);
+  }
+}
+
+function assertSafeDirectory(directory: string | undefined): void {
+  if (directory === undefined) return;
+  // Allow forward slashes to nest subdirectories, but block parent refs,
+  // absolute paths, and control chars.
+  if (directory.startsWith('/') || directory.startsWith('\\')) {
+    throw new Error(`Unsafe directory: ${JSON.stringify(directory)} — absolute paths not allowed`);
+  }
+  const segments = directory.split(/[/\\]/);
+  for (const seg of segments) {
+    if (seg === '' || seg === '.' || seg === '..') {
+      throw new Error(`Unsafe directory: ${JSON.stringify(directory)} — contains empty or parent segment`);
+    }
+    if (INVALID_TITLE_CHARS.test(seg.replace('/', ''))) {
+      throw new Error(`Unsafe directory segment: ${JSON.stringify(seg)}`);
+    }
+  }
+}
+
 export class VaultWriter {
   constructor(
     private vaultPath: string,
@@ -18,6 +56,9 @@ export class VaultWriter {
   ) {}
 
   createNode(opts: CreateNodeOptions): string {
+    assertSafeTitle(opts.title);
+    assertSafeDirectory(opts.directory);
+
     const dir = opts.directory
       ? join(this.vaultPath, opts.directory)
       : this.vaultPath;
