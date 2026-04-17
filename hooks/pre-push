@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# pre-push — Block pushes when tsc or vitest fail.
+# Enable once per clone: git config core.hooksPath hooks
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+if ! command -v npm >/dev/null 2>&1; then
+  echo "pre-push: npm not installed — skipping gate" >&2
+  exit 0
+fi
+
+npm run build
+npm test
