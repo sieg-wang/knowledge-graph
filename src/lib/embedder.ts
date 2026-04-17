@@ -6,9 +6,11 @@ export class Embedder {
   private extractor: FeatureExtractionPipeline | null = null;
 
   async init(): Promise<void> {
+    // transformers.js pipeline() returns a union across every task type; the
+    // resulting type is too complex for TS to represent, so narrow via unknown.
     this.extractor = await pipeline('feature-extraction', MODEL, {
       dtype: 'q8',
-    }) as FeatureExtractionPipeline;
+    }) as unknown as FeatureExtractionPipeline;
   }
 
   async embed(text: string): Promise<Float32Array> {

@@ -29,7 +29,8 @@ function safeRank(graph: Graph): Record<string, number> {
 
   if (connected.order === 0) return scores;
 
-  const pr = pagerank(connected, { maxIterations: 1000, tolerance: 1e-6 });
+  // getEdgeWeight: null → treat graph as unweighted (all edges weight 1).
+  const pr = pagerank(connected, { maxIterations: 1000, tolerance: 1e-6, getEdgeWeight: null });
   for (const [id, score] of Object.entries(pr)) {
     scores[id] = score;
   }
