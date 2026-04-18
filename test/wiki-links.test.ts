@@ -94,4 +94,21 @@ describe('resolveLink', () => {
     const result = resolveLink('Shared', ambigLookup);
     expect(result).toBe('Dir1/Shared.md');
   });
+
+  it('falls back when ambiguous path-qualified raw has no matching directory', () => {
+    const paths = ['Dir1/Shared.md', 'Dir2/Shared.md'];
+    const ambigLookup = buildStemLookup(paths);
+    // raw has "/" but no candidate starts with "Dir3/Shared" — exercises the
+    // "match === undefined" branch at wiki-links.ts:77-78 and falls through to warn.
+    const result = resolveLink('Dir3/Shared', ambigLookup);
+    expect(result).toBe('Dir1/Shared.md');
+  });
+
+  it('uses explicit allPathsSet when provided', () => {
+    const paths = ['People/Alice Smith.md'];
+    const lookup = buildStemLookup(paths);
+    // Passing allPathsSet exercises the left-hand side of the ?? on line 60.
+    const result = resolveLink('People/Alice Smith', lookup, new Set(paths));
+    expect(result).toBe('People/Alice Smith.md');
+  });
 });

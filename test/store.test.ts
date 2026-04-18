@@ -233,4 +233,13 @@ describe('Store', () => {
     expect(store.getEdgesFrom('a.md')).toHaveLength(0);
     expect(store.getEdgesFrom('c.md')).toHaveLength(0);
   });
+
+  it('searchFullText re-throws non-FTS errors (not a syntax error)', () => {
+    // Close the DB so any prepare() call fails with a generic "database is closed"
+    // error that doesn't match the fts5/unterminated/syntax error recovery path.
+    store.close();
+    expect(() => store.searchFullText('anything')).toThrow();
+    // re-open a fresh store so afterEach can still close cleanly
+    store = new Store(':memory:');
+  });
 });
