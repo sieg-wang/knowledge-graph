@@ -47,6 +47,10 @@ export class IndexPipeline {
       }
     }
 
+    // Track which sources got their content re-parsed this run, so we don't
+    // double-process them in the stub-resolution pass below.
+    const justIndexed = new Set<string>();
+
     // Index nodes (incremental)
     for (const node of nodes) {
       const fileStat = await stat(join(vaultPath, node.id));
@@ -74,7 +78,49 @@ export class IndexPipeline {
       }
 
       this.store.upsertSync(node.id, mtime);
+      justIndexed.add(node.id);
       stats.nodesIndexed++;
+    }
+
+    // Reconcile previously-stub targets that now resolve to real files.
+    //
+    // When file A.md links `[[B]]` and B.md is missing, the parser emits
+    // `A → _stub/B.md` and creates `_stub/B.md`. Later, when B.md is created,
+    // A.md's mtime is unchanged so the loop above SKIPS it — leaving the
+    // stale `A → _stub/B.md` edge in the DB and never inserting `A → B.md`.
+    //
+    // Fix: detect resolved stubs (in DB before this run, absent from
+    // current parse), find every source that linked to them, and reconcile
+    // those sources' edges from the freshly-parsed `edgesBySource` map.
+    const newStubIds = new Set(stubIds);
+    const resolvedStubIds: string[] = [];
+    for (const id of this.store.allNodeIds()) {
+      if (id.startsWith('_stub/') && !newStubIds.has(id)) {
+        resolvedStubIds.push(id);
+      }
+    }
+
+    if (resolvedStubIds.length > 0) {
+      const sourcesToReconcile = new Set<string>();
+      for (const stubId of resolvedStubIds) {
+        for (const edge of this.store.getEdgesTo(stubId)) {
+          // Skip sources we just re-parsed — their edges are already correct.
+          if (!justIndexed.has(edge.sourceId)) {
+            sourcesToReconcile.add(edge.sourceId);
+          }
+        }
+      }
+      for (const sourceId of sourcesToReconcile) {
+        this.store.deleteAllEdgesFrom(sourceId);
+        for (const edge of edgesBySource.get(sourceId) ?? []) {
+          this.store.insertEdge(edge);
+          stats.edgesIndexed++;
+        }
+      }
+      // Drop the now-orphaned stub nodes.
+      for (const stubId of resolvedStubIds) {
+        this.store.deleteNode(stubId);
+      }
     }
 
     // Create stub nodes
