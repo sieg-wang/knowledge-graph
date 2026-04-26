@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, readFileSync, existsSync } from 'fs';
+import { mkdtempSync, readFileSync, existsSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { cpSync } from 'fs';
@@ -157,6 +157,32 @@ describe('VaultWriter', () => {
       });
       expect(existsSync(join(tempVault, 'a', 'b', 'c', 'Inside.md'))).toBe(true);
     });
+
+    // Regression: createNode previously called writeFileSync directly, so a
+    // crash mid-write would leave a partially-written <title>.md behind that
+    // the next IndexPipeline pass would treat as a real, corrupt node. The
+    // fix is a tmp-file + rename publish (POSIX-atomic on the same fs).
+    it('publishes via tmp+rename so no partial file is left under the final name', () => {
+      const dir = join(tempVault, 'Concepts');
+      const before = readdirSync(dir);
+
+      writer.createNode({
+        title: 'Atomic Concept',
+        directory: 'Concepts',
+        frontmatter: { type: 'concept' },
+        content: 'Body.',
+      });
+
+      const after = readdirSync(dir);
+      // Expected new file is present.
+      expect(after).toContain('Atomic Concept.md');
+      // No leftover .tmp.* sibling from the publish.
+      const leftover = after.filter(
+        (n) => !before.includes(n) && n.startsWith('Atomic Concept.md.tmp.'),
+      );
+      expect(leftover).toEqual([]);
+    });
+
   });
 
   describe('annotateNode', () => {

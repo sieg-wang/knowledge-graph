@@ -1,4 +1,12 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } from 'fs';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+  appendFileSync,
+  renameSync,
+  unlinkSync,
+} from 'fs';
 import { join, basename } from 'path';
 import matter from 'gray-matter';
 import type { Store } from './store.js';
@@ -74,7 +82,20 @@ export class VaultWriter {
 
     const fm = { title: opts.title, ...opts.frontmatter };
     const fileContent = matter.stringify(opts.content, fm);
-    writeFileSync(absPath, fileContent, 'utf-8');
+
+    // Atomic publish: write to a sibling tmp path, then rename. A crash
+    // mid-write leaves the tmp file behind (which we clean up on the next
+    // attempt via the existsSync(absPath) guard above) instead of a
+    // half-written <title>.md that subsequent indexing would treat as a
+    // real, corrupt node.
+    const tmpPath = `${absPath}.tmp.${process.pid}.${Date.now()}`;
+    try {
+      writeFileSync(tmpPath, fileContent, 'utf-8');
+      renameSync(tmpPath, absPath);
+    } catch (err) {
+      try { unlinkSync(tmpPath); } catch { /* tmp may not exist */ }
+      throw err;
+    }
 
     // Index in store
     this.indexFile(relPath);
