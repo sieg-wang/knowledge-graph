@@ -100,6 +100,11 @@ export class IndexPipeline {
       }
     }
 
+    // Track edge-only topology changes from the stub-resolution pass below
+    // (they don't bump nodesIndexed/stubNodesCreated but still mutate the
+    // graph and therefore require community recomputation).
+    let edgeTopologyChanged = false;
+
     if (resolvedStubIds.length > 0) {
       const sourcesToReconcile = new Set<string>();
       for (const stubId of resolvedStubIds) {
@@ -121,6 +126,7 @@ export class IndexPipeline {
       for (const stubId of resolvedStubIds) {
         this.store.deleteNode(stubId);
       }
+      edgeTopologyChanged = true;
     }
 
     // Create stub nodes
@@ -136,8 +142,16 @@ export class IndexPipeline {
       }
     }
 
-    // If any nodes were indexed, re-run community detection
-    if (stats.nodesIndexed > 0 || stats.stubNodesCreated > 0) {
+    // Re-run community detection on ANY topology change. Previously only
+    // gated on nodesIndexed/stubNodesCreated, which meant edge-only stub
+    // reconciliation (the path the recent fix added) silently left
+    // communities pointing at the pre-resolution graph — kg_communities
+    // would report stale membership while kg_search saw the repaired edges.
+    if (
+      stats.nodesIndexed > 0 ||
+      stats.stubNodesCreated > 0 ||
+      edgeTopologyChanged
+    ) {
       const kg = KnowledgeGraph.fromStore(this.store);
       const communities = kg.detectCommunities(resolution);
       this.store.clearCommunities();

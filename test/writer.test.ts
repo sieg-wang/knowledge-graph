@@ -212,8 +212,12 @@ describe('VaultWriter', () => {
 
       writer.addLink('Source.md', 'People/Alice Smith', 'Related to Alice.');
 
+      // Unknown targets now route through the parser-compatible `_stub/`
+      // prefix so IndexPipeline.reconciliation can later rewrite the edge
+      // when the real file appears. Previous behavior wrote bare
+      // "People/Alice Smith.md" — graph-invisible until next reparse.
       const edges = store.getEdgesFrom('Source.md');
-      expect(edges.some(e => e.targetId === 'People/Alice Smith.md')).toBe(true);
+      expect(edges.some(e => e.targetId === '_stub/People/Alice Smith.md')).toBe(true);
     });
 
     it('resolves target by title to full node ID', () => {
@@ -237,7 +241,7 @@ describe('VaultWriter', () => {
       expect(edges.some(e => e.targetId === 'Concepts/Widget Theory.md')).toBe(true);
     });
 
-    it('falls back to naive .md append for unknown targets', () => {
+    it('uses _stub/ prefix for unknown targets (matches parser semantics)', () => {
       writer.createNode({
         title: 'Source',
         frontmatter: {},
@@ -247,10 +251,15 @@ describe('VaultWriter', () => {
       writer.addLink('Source.md', 'Unknown Target', 'Linked to unknown.');
 
       const edges = store.getEdgesFrom('Source.md');
-      expect(edges.some(e => e.targetId === 'Unknown Target.md')).toBe(true);
+      expect(edges.some(e => e.targetId === '_stub/Unknown Target.md')).toBe(true);
+
+      // Stub node is materialized so KnowledgeGraph.fromStore includes the
+      // edge in adjacency builds (without this, the link is invisible to
+      // graph traversal until the next full reparse).
+      expect(store.getNode('_stub/Unknown Target.md')).toBeDefined();
     });
 
-    it('preserves .md extension in fallback for unknown targets', () => {
+    it('preserves .md extension when constructing stub ID for unknown targets', () => {
       writer.createNode({
         title: 'Source',
         frontmatter: {},
@@ -260,7 +269,29 @@ describe('VaultWriter', () => {
       writer.addLink('Source.md', 'Unknown.md', 'Link context.');
 
       const edges = store.getEdgesFrom('Source.md');
-      expect(edges.some(e => e.targetId === 'Unknown.md')).toBe(true);
+      expect(edges.some(e => e.targetId === '_stub/Unknown.md')).toBe(true);
+      expect(store.getNode('_stub/Unknown.md')).toBeDefined();
+    });
+
+    it('does NOT use _stub/ prefix when target resolves to an existing node', () => {
+      writer.createNode({
+        title: 'Source',
+        frontmatter: {},
+        content: 'Some content.',
+      });
+      store.upsertNode({
+        id: 'People/Bob.md',
+        title: 'Bob',
+        content: '',
+        frontmatter: {},
+      });
+
+      writer.addLink('Source.md', 'Bob', 'Hi Bob.');
+
+      const edges = store.getEdgesFrom('Source.md');
+      // Resolved targets bypass the stub prefix entirely.
+      expect(edges.some(e => e.targetId === 'People/Bob.md')).toBe(true);
+      expect(edges.some(e => e.targetId.startsWith('_stub/'))).toBe(false);
     });
 
     it('picks first match when target resolves ambiguously', () => {

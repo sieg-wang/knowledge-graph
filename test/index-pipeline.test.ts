@@ -177,4 +177,50 @@ describe('IndexPipeline', () => {
       rmSync(tmpVault, { recursive: true, force: true });
     }
   });
+
+  // Regression: edge-only stub reconciliation must rerun community detection.
+  // Before the fix, the community guard was `nodesIndexed > 0 || stubNodesCreated > 0`,
+  // so a run that only reconciled previously-stub edges (mtime-unchanged source)
+  // left communities pointing at the pre-resolution graph — kg_communities
+  // reported stale membership while kg_search saw the repaired edges.
+  it('reruns community detection on edge-only stub reconciliation', async () => {
+    const tmpVault = mkdtempSync(join(tmpdir(), 'kg-stub-community-'));
+    const tmpStore = new Store(':memory:');
+    const tmpPipeline = new IndexPipeline(tmpStore, embedder);
+
+    try {
+      // Vault with three sources linking to a missing target. Multiple
+      // sources sharing a stub target ensures community membership has
+      // something meaningful to recompute when the stub resolves.
+      const aPath = join(tmpVault, 'A.md');
+      const bPath = join(tmpVault, 'B.md');
+      const cPath = join(tmpVault, 'C.md');
+      writeFileSync(aPath, '# A\n[[Hub]]\n');
+      writeFileSync(bPath, '# B\n[[Hub]]\n');
+      writeFileSync(cPath, '# C\n[[Hub]]\n');
+      const pinned = Math.floor(Date.now() / 1000) - 3600;
+      utimesSync(aPath, pinned, pinned);
+      utimesSync(bPath, pinned, pinned);
+      utimesSync(cPath, pinned, pinned);
+
+      const first = await tmpPipeline.index(tmpVault);
+      expect(first.communitiesDetected).toBeGreaterThan(0);
+
+      // Now create the missing Hub.md AND keep A/B/C mtimes pinned so
+      // they get skipped — only the stub-reconciliation pass should run.
+      writeFileSync(join(tmpVault, 'Hub.md'), '# Hub\nContent.\n');
+      utimesSync(aPath, pinned, pinned);
+      utimesSync(bPath, pinned, pinned);
+      utimesSync(cPath, pinned, pinned);
+
+      const second = await tmpPipeline.index(tmpVault);
+      // Only Hub was newly indexed; A/B/C were skipped — but the
+      // reconciliation pass mutated their edges, so communities must rerun.
+      expect(second.nodesIndexed).toBe(1);
+      expect(second.communitiesDetected).toBeGreaterThan(0);
+    } finally {
+      tmpStore.close();
+      rmSync(tmpVault, { recursive: true, force: true });
+    }
+  });
 });

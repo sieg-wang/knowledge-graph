@@ -106,11 +106,31 @@ export class VaultWriter {
     // Re-index source node
     this.indexFile(sourceId);
 
-    // Resolve target to actual node ID, fall back to naive .md append for stubs
+    // Resolve target to actual node ID. Unknown targets must use the same
+    // `_stub/` prefix the parser uses (parser.ts emits `_stub/<name>.md`),
+    // so the IndexPipeline reconciliation pass can later rewrite them to
+    // real edges when the target file is created. Without the prefix,
+    // the resulting edge points at a node ID that doesn't exist in the
+    // node table; KnowledgeGraph.fromStore filters those edges out and
+    // the link is invisible to graph traversal until the next reparse.
     const matches = resolveNodeName(targetRef, this.store);
-    const targetId = matches.length > 0
-      ? matches[0].nodeId
-      : (targetRef.endsWith('.md') ? targetRef : targetRef + '.md');
+    let targetId: string;
+    if (matches.length > 0) {
+      targetId = matches[0].nodeId;
+    } else {
+      const baseName = targetRef.endsWith('.md') ? targetRef : targetRef + '.md';
+      targetId = `_stub/${baseName}`;
+      // Materialize the stub node so KnowledgeGraph.fromStore includes the
+      // edge in adjacency builds. Mirrors IndexPipeline's stub creation.
+      if (!this.store.getNode(targetId)) {
+        this.store.upsertNode({
+          id: targetId,
+          title: baseName.replace(/\.md$/, ''),
+          content: '',
+          frontmatter: { _stub: true },
+        });
+      }
+    }
     this.store.insertEdge({
       sourceId,
       targetId,
