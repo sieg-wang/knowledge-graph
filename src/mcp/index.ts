@@ -40,7 +40,7 @@ function requireMatch(name: string): string {
 server.tool(
   'kg_index',
   'Parse vault and build/update the knowledge graph',
-  { resolution: z.number().optional().describe('Louvain resolution parameter (default 1.0)') },
+  { resolution: z.number().positive().optional().describe('Louvain resolution parameter (default 1.0)') },
   async ({ resolution }) => {
     if (!embedderReady) { await embedder.init(); embedderReady = true; }
     const pipeline = new IndexPipeline(store, embedder);
@@ -56,7 +56,7 @@ server.tool(
   {
     name: z.string().describe('Node name (fuzzy matched)'),
     brief: z.boolean().optional().describe('Brief mode: metadata + connection titles only (default true)'),
-    maxContentLength: z.number().optional().describe('Truncate content to N chars in full mode (default 2000)'),
+    maxContentLength: z.number().int().positive().optional().describe('Truncate content to N chars in full mode (default 2000)'),
   },
   async ({ name, brief, maxContentLength }) => {
     const nodeId = requireMatch(name);
@@ -100,7 +100,7 @@ server.tool(
   'Get connected nodes at N-hop depth',
   {
     name: z.string().describe('Node name (fuzzy matched)'),
-    depth: z.number().optional().describe('Hop depth (default 1)'),
+    depth: z.number().int().positive().optional().describe('Hop depth (default 1)'),
   },
   async ({ name, depth }) => {
     const nodeId = requireMatch(name);
@@ -116,7 +116,7 @@ server.tool(
   {
     query: z.string().describe('Search query'),
     fulltext: z.boolean().optional().describe('Use full-text search instead of semantic'),
-    limit: z.number().optional().describe('Max results (default 20)'),
+    limit: z.number().int().positive().optional().describe('Max results (default 20)'),
   },
   async ({ query, fulltext, limit }) => {
     let results;
@@ -136,7 +136,7 @@ server.tool(
   {
     from: z.string().describe('Source node name'),
     to: z.string().describe('Target node name'),
-    maxDepth: z.number().optional().describe('Maximum path depth (default 3)'),
+    maxDepth: z.number().int().positive().optional().describe('Maximum path depth (default 3)'),
   },
   async ({ from, to, maxDepth }) => {
     const fromId = requireMatch(from);
@@ -168,7 +168,7 @@ server.tool(
   'Extract a local neighborhood as a self-contained graph',
   {
     name: z.string().describe('Center node name'),
-    depth: z.number().optional().describe('Hop depth (default 1)'),
+    depth: z.number().int().positive().optional().describe('Hop depth (default 1)'),
   },
   async ({ name, depth }) => {
     const nodeId = requireMatch(name);
@@ -207,7 +207,7 @@ server.tool(
 server.tool(
   'kg_bridges',
   'Find bridge nodes with highest betweenness centrality',
-  { limit: z.number().optional().describe('Max results (default 20)') },
+  { limit: z.number().int().positive().optional().describe('Max results (default 20)') },
   async ({ limit }) => {
     const kg = getGraph();
     const bridges = kg.bridges(limit ?? 20);
@@ -220,14 +220,19 @@ server.tool(
   'Find central nodes by PageRank',
   {
     community: z.string().optional().describe('Restrict to community ID'),
-    limit: z.number().optional().describe('Max results (default 20)'),
+    limit: z.number().int().positive().optional().describe('Max results (default 20)'),
   },
   async ({ community, limit }) => {
     const kg = getGraph();
     let communityNodeIds: string[] | undefined;
     if (community) {
+      // Bare parseInt would silently return NaN for "abc" and run unfiltered;
+      // surface the bad input as a tool error instead.
+      if (!/^\d+$/.test(community)) {
+        throw new Error(`community: must be a non-negative integer ID (got ${JSON.stringify(community)})`);
+      }
       const communities = store.getAllCommunities();
-      const c = communities.find(c => c.id === parseInt(community));
+      const c = communities.find(c => c.id === parseInt(community, 10));
       communityNodeIds = c?.nodeIds;
     }
     const central = kg.centralNodes(limit ?? 20, communityNodeIds);

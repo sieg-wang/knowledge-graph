@@ -7,6 +7,7 @@ import { IndexPipeline } from '../lib/index-pipeline.js';
 import { KnowledgeGraph } from '../lib/graph.js';
 import { Search } from '../lib/search.js';
 import { requireMatch } from '../lib/resolve.js';
+import { parsePositiveInt } from '../lib/numeric.js';
 
 const program = new Command();
 
@@ -77,7 +78,7 @@ program
     if (!node) { console.error(`Node not found`); process.exit(1); }
 
     if (opts.full) {
-      const limit = parseInt(opts.maxContent);
+      const limit = parsePositiveInt(opts.maxContent, '--max-content');
       const truncatedContent = node.content.length > limit
         ? node.content.slice(0, limit) + `\n\n... [truncated, ${node.content.length} chars total]`
         : node.content;
@@ -109,7 +110,7 @@ program
     const store = getStore();
     const nodeId = requireSingleMatch(name, store);
     const kg = KnowledgeGraph.fromStore(store);
-    const neighbors = kg.neighbors(nodeId, parseInt(opts.depth));
+    const neighbors = kg.neighbors(nodeId, parsePositiveInt(opts.depth, '--depth'));
     output(neighbors);
     store.close();
   });
@@ -122,13 +123,13 @@ program
   .action(async (query, opts) => {
     const store = getStore();
     if (opts.fulltext) {
-      const results = store.searchFullText(query).slice(0, parseInt(opts.limit));
+      const results = store.searchFullText(query).slice(0, parsePositiveInt(opts.limit, '--limit'));
       output(results);
     } else {
       const embedder = new Embedder();
       await embedder.init();
       const search = new Search(store, embedder);
-      const results = await search.semantic(query, parseInt(opts.limit));
+      const results = await search.semantic(query, parsePositiveInt(opts.limit, '--limit'));
       output(results);
       await embedder.dispose();
     }
@@ -144,7 +145,7 @@ program
     const fromId = requireSingleMatch(from, store);
     const toId = requireSingleMatch(to, store);
     const kg = KnowledgeGraph.fromStore(store);
-    const paths = kg.findPaths(fromId, toId, parseInt(opts.maxDepth));
+    const paths = kg.findPaths(fromId, toId, parsePositiveInt(opts.maxDepth, '--max-depth'));
     output(paths);
     store.close();
   });
@@ -170,7 +171,7 @@ program
     const store = getStore();
     const nodeId = requireSingleMatch(name, store);
     const kg = KnowledgeGraph.fromStore(store);
-    const sub = kg.subgraph(nodeId, parseInt(opts.depth));
+    const sub = kg.subgraph(nodeId, parsePositiveInt(opts.depth, '--depth'));
     output(sub);
     store.close();
   });
@@ -213,7 +214,7 @@ program
   .action((opts) => {
     const store = getStore();
     const kg = KnowledgeGraph.fromStore(store);
-    const bridges = kg.bridges(parseInt(opts.limit));
+    const bridges = kg.bridges(parsePositiveInt(opts.limit, '--limit'));
     output(bridges);
     store.close();
   });
@@ -228,11 +229,12 @@ program
     const kg = KnowledgeGraph.fromStore(store);
     let communityNodeIds: string[] | undefined;
     if (opts.community) {
+      const communityId = parsePositiveInt(opts.community, '--community', { allowZero: true });
       const communities = store.getAllCommunities();
-      const c = communities.find(c => c.id === parseInt(opts.community));
+      const c = communities.find(c => c.id === communityId);
       communityNodeIds = c?.nodeIds;
     }
-    const central = kg.centralNodes(parseInt(opts.limit), communityNodeIds);
+    const central = kg.centralNodes(parsePositiveInt(opts.limit, '--limit'), communityNodeIds);
     output(central);
     store.close();
   });
