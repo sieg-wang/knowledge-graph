@@ -339,5 +339,91 @@ describe('VaultWriter', () => {
     it('throws if source node file does not exist', () => {
       expect(() => writer.addLink('nonexistent.md', 'target', 'context')).toThrow(/not found/);
     });
+
+    // ── Codex review #11: wiki-link injection via unescaped target/context ──
+
+    it('rejects target containing `]]` (would break out of wiki-link)', () => {
+      writer.createNode({ title: 'Source', frontmatter: {}, content: 'x' });
+      expect(() =>
+        writer.addLink('Source.md', 'foo]] [[malicious', 'context'),
+      ).toThrow(/Unsafe link target/);
+    });
+
+    it('rejects target containing `[[` (would nest wiki-links)', () => {
+      writer.createNode({ title: 'Source', frontmatter: {}, content: 'x' });
+      expect(() =>
+        writer.addLink('Source.md', 'foo [[bar', 'context'),
+      ).toThrow(/Unsafe link target/);
+    });
+
+    it('rejects target containing newline (would split lines)', () => {
+      writer.createNode({ title: 'Source', frontmatter: {}, content: 'x' });
+      expect(() =>
+        writer.addLink('Source.md', 'foo\nbar', 'context'),
+      ).toThrow(/Unsafe link target/);
+    });
+
+    it('rejects target containing `|` (wiki-link alias delimiter)', () => {
+      writer.createNode({ title: 'Source', frontmatter: {}, content: 'x' });
+      expect(() =>
+        writer.addLink('Source.md', 'foo|alias', 'context'),
+      ).toThrow(/Unsafe link target/);
+    });
+
+    it('rejects empty target', () => {
+      writer.createNode({ title: 'Source', frontmatter: {}, content: 'x' });
+      expect(() =>
+        writer.addLink('Source.md', '', 'context'),
+      ).toThrow(/Unsafe link target/);
+    });
+
+    it('rejects context containing newline (would inject extra content)', () => {
+      writer.createNode({ title: 'Source', frontmatter: {}, content: 'x' });
+      expect(() =>
+        writer.addLink('Source.md', 'Target', 'line1\n\n## Injected heading'),
+      ).toThrow(/Unsafe link context/);
+    });
+
+    it('accepts target with forward slashes (folder-nested refs are valid)', () => {
+      writer.createNode({ title: 'Source', frontmatter: {}, content: 'x' });
+      // Slashes allowed — wiki refs like "People/Alice" are first-class.
+      expect(() =>
+        writer.addLink('Source.md', 'People/Alice Smith', 'A note.'),
+      ).not.toThrow();
+    });
+
+    it('accepts context with markdown punctuation but no newlines', () => {
+      writer.createNode({ title: 'Source', frontmatter: {}, content: 'x' });
+      // Plain markdown text (asterisks, parens, hyphens) must still pass.
+      expect(() =>
+        writer.addLink('Source.md', 'Target', '*emphasized* (with parens) — and dashes.'),
+      ).not.toThrow();
+    });
+
+    // ── Codex review #10: indexFile applies sanitizeFrontmatter ──
+
+    it('strips prototype-pollution keys when re-indexing via writer paths', () => {
+      // Create a file directly with a hostile frontmatter, bypassing
+      // createNode's own input validation. annotateNode → indexFile is the
+      // path that previously skipped sanitization.
+      const evilPath = join(tempVault, 'Evil.md');
+      const { writeFileSync: wfs } = require('fs') as typeof import('fs');
+      wfs(
+        evilPath,
+        '---\n__proto__:\n  polluted: true\nconstructor:\n  evil: 1\nprototype:\n  x: y\nlegit: keep_me\n---\n# evil\n',
+        'utf-8',
+      );
+
+      // Index via writer's annotate path (calls private indexFile).
+      writer.annotateNode('Evil.md', '\nappended.\n');
+
+      const node = store.getNode('Evil.md');
+      expect(node).toBeDefined();
+      const fm = node!.frontmatter as Record<string, unknown>;
+      expect(Object.prototype.hasOwnProperty.call(fm, '__proto__')).toBe(false);
+      expect(Object.prototype.hasOwnProperty.call(fm, 'constructor')).toBe(false);
+      expect(Object.prototype.hasOwnProperty.call(fm, 'prototype')).toBe(false);
+      expect(fm.legit).toBe('keep_me');
+    });
   });
 });

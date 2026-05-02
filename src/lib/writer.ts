@@ -11,6 +11,7 @@ import { join, basename } from 'path';
 import matter from 'gray-matter';
 import type { Store } from './store.js';
 import { resolveNodeName } from './resolve.js';
+import { sanitizeFrontmatter } from './parser.js';
 
 export interface CreateNodeOptions {
   title: string;
@@ -27,6 +28,17 @@ export interface CreateNodeOptions {
 //
 // Exported for unit tests; internal callers should use createNode/addLink.
 export const INVALID_TITLE_CHARS = /[\x00-\x1f/\\:*?"<>|]/;
+
+// addLink writes the literal text  `${context} [[${targetRef}]]`  into the
+// source markdown. A target containing `]]`, `[[`, `|`, or a newline would
+// break out of the wiki-link syntax (creating extra/extraneous links); a
+// context containing newlines would inject arbitrary additional content
+// past the intended single line. Both regexes are deliberately strict —
+// callers needing rich markdown should use annotateNode, not addLink.
+//
+// Exported for unit tests.
+export const INVALID_LINK_TARGET_CHARS = /[\x00-\x1f\[\]|]/;
+export const INVALID_LINK_CONTEXT_CHARS = /[\x00-\x1f]/;
 
 function assertSafeTitle(title: string): void {
   if (!title || INVALID_TITLE_CHARS.test(title)) {
@@ -121,6 +133,20 @@ export class VaultWriter {
       throw new Error(`Source node not found: ${sourceId}`);
     }
 
+    // Both fields reach this method from MCP tool input (LLM-controlled).
+    // Reject anything that would corrupt the appended line — bracket
+    // characters in the target or newlines in either field.
+    if (!targetRef || INVALID_LINK_TARGET_CHARS.test(targetRef)) {
+      throw new Error(
+        `Unsafe link target: ${JSON.stringify(targetRef)} — contains bracket, pipe, or control character`,
+      );
+    }
+    if (INVALID_LINK_CONTEXT_CHARS.test(context)) {
+      throw new Error(
+        'Unsafe link context: contains newline or control character (use annotateNode for multi-line content)',
+      );
+    }
+
     const line = `\n${context} [[${targetRef}]]`;
     appendFileSync(absPath, line, 'utf-8');
 
@@ -167,7 +193,12 @@ export class VaultWriter {
     let content: string;
     try {
       const parsed = matter(raw);
-      fm = parsed.data;
+      // Strip prototype-pollution keys before passing frontmatter to the
+      // store. The parser path applies the same guard (parser.ts) — this
+      // re-index path used to bypass it (Codex review #10), letting any
+      // file edited or appended-to via writer methods land __proto__ /
+      // constructor / prototype keys in the store and downstream spreads.
+      fm = sanitizeFrontmatter(parsed.data);
       content = parsed.content;
     } catch {
       fm = {};

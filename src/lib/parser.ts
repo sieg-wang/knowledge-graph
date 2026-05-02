@@ -87,7 +87,11 @@ export async function parseVault(vaultPath: string): Promise<ParseResult> {
 // bracket notation anywhere downstream. We keep a plain object (rather than
 // Object.create(null)) because downstream callers rely on standard object
 // spreading and JSON.stringify, which work with plain objects.
-function sanitizeFrontmatter(data: unknown): Record<string, unknown> {
+//
+// Exported so writer.ts can apply the same guard on its re-index path.
+// Without this, frontmatter that flows through writer.indexFile() →
+// store.upsertNode() bypasses the parser-side sanitization (Codex review #10).
+export function sanitizeFrontmatter(data: unknown): Record<string, unknown> {
   if (!data || typeof data !== 'object') return {};
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(data as Record<string, unknown>)) {
