@@ -32,13 +32,18 @@ export const INVALID_TITLE_CHARS = /[\x00-\x1f/\\:*?"<>|]/;
 // addLink writes the literal text  `${context} [[${targetRef}]]`  into the
 // source markdown. A target containing `]]`, `[[`, `|`, or a newline would
 // break out of the wiki-link syntax (creating extra/extraneous links); a
-// context containing newlines would inject arbitrary additional content
-// past the intended single line. Both regexes are deliberately strict —
-// callers needing rich markdown should use annotateNode, not addLink.
+// context containing the same characters would, on the next full reparse
+// (parser.ts extractWikiLinks), materialize phantom edges the caller did
+// not request — kg_add_link is meant to create exactly one link per call.
+// Both regexes are deliberately strict — callers needing rich markdown
+// should use annotateNode, not addLink.
+//
+// Codex review #5 (2026-05-03): added bracket/pipe rejection to context
+// (was: control-char-only) so context cannot smuggle in extra wiki-links.
 //
 // Exported for unit tests.
 export const INVALID_LINK_TARGET_CHARS = /[\x00-\x1f\[\]|]/;
-export const INVALID_LINK_CONTEXT_CHARS = /[\x00-\x1f]/;
+export const INVALID_LINK_CONTEXT_CHARS = /[\x00-\x1f\[\]|]/;
 
 function assertSafeTitle(title: string): void {
   if (!title || INVALID_TITLE_CHARS.test(title)) {
@@ -143,7 +148,8 @@ export class VaultWriter {
     }
     if (INVALID_LINK_CONTEXT_CHARS.test(context)) {
       throw new Error(
-        'Unsafe link context: contains newline or control character (use annotateNode for multi-line content)',
+        'Unsafe link context: contains bracket, pipe, newline, or control character ' +
+        '(addLink creates exactly one link; use annotateNode for arbitrary markdown)',
       );
     }
 

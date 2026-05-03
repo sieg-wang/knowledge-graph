@@ -384,6 +384,39 @@ describe('VaultWriter', () => {
       ).toThrow(/Unsafe link context/);
     });
 
+    // ── Codex review #5 (2026-05-03): context cannot smuggle in extra wiki-links ──
+
+    it('rejects context containing `[[` (would create phantom edge on reparse)', () => {
+      writer.createNode({ title: 'Source', frontmatter: {}, content: 'x' });
+      expect(() =>
+        writer.addLink('Source.md', 'Target', 'see also [[Other Node]] for more'),
+      ).toThrow(/Unsafe link context/);
+    });
+
+    it('rejects context containing `]]` alone (closing bracket leak)', () => {
+      writer.createNode({ title: 'Source', frontmatter: {}, content: 'x' });
+      expect(() =>
+        writer.addLink('Source.md', 'Target', 'cf. earlier note]]'),
+      ).toThrow(/Unsafe link context/);
+    });
+
+    it('rejects context containing `|` (wiki-alias delimiter leak)', () => {
+      writer.createNode({ title: 'Source', frontmatter: {}, content: 'x' });
+      expect(() =>
+        writer.addLink('Source.md', 'Target', 'tagged | important'),
+      ).toThrow(/Unsafe link context/);
+    });
+
+    it('error message points operator to annotateNode for arbitrary markdown', () => {
+      writer.createNode({ title: 'Source', frontmatter: {}, content: 'x' });
+      try {
+        writer.addLink('Source.md', 'Target', 'has [[bad]] context');
+        expect.fail('expected throw');
+      } catch (err) {
+        expect((err as Error).message).toMatch(/annotateNode/);
+      }
+    });
+
     it('accepts target with forward slashes (folder-nested refs are valid)', () => {
       writer.createNode({ title: 'Source', frontmatter: {}, content: 'x' });
       // Slashes allowed — wiki refs like "People/Alice" are first-class.
