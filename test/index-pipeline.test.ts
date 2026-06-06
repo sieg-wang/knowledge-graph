@@ -155,6 +155,55 @@ describe('IndexPipeline', () => {
     }
   });
 
+  // Regression: the skip was keyed on mtime monotonically INCREASING
+  // (`prevMtime >= mtime → skip`). But git checkout / cp -p restore / rsync /
+  // Dropbox commonly set a CHANGED file's mtime to a value <= the recorded
+  // one. Such a file was then never re-parsed — stale content, edges, and
+  // embedding persisted silently while the pipeline reported nodesSkipped++
+  // as if nothing was wrong. Intent: any mtime DIFFERENCE (not just an
+  // increase) must trigger a re-index so backdated edits are caught.
+  it('re-indexes a changed file whose mtime was backdated (git checkout / restore)', async () => {
+    const tmpVault = mkdtempSync(join(tmpdir(), 'kg-backdate-'));
+    const tmpStore = new Store(':memory:');
+    const tmpPipeline = new IndexPipeline(tmpStore, embedder);
+
+    try {
+      const aPath = join(tmpVault, 'A.md');
+      // First version links to B.
+      writeFileSync(aPath, '# A\n\nv1 content unique-token-alpha. See [[B]].\n');
+      const t1 = Math.floor(Date.now() / 1000); // seconds precision
+      utimesSync(aPath, t1, t1);
+
+      const first = await tmpPipeline.index(tmpVault);
+      expect(first.nodesIndexed).toBe(1);
+      const beforeEdges = tmpStore.getEdgesFrom('A.md');
+      expect(beforeEdges.some(e => e.targetId.includes('B'))).toBe(true);
+      expect(tmpStore.getNode('A.md')!.content).toContain('unique-token-alpha');
+
+      // Rewrite A with DIFFERENT content + a DIFFERENT link, then BACKDATE
+      // its mtime to before the recorded mtime (simulates restoring an older
+      // revision whose bytes nonetheless changed vs. the indexed version).
+      writeFileSync(aPath, '# A\n\nv2 content unique-token-beta. See [[C]].\n');
+      const tOld = t1 - 3600; // one hour earlier than recorded
+      utimesSync(aPath, tOld, tOld);
+
+      const second = await tmpPipeline.index(tmpVault);
+
+      // The backdated change MUST be picked up, not silently skipped.
+      expect(second.nodesSkipped).toBe(0);
+      expect(second.nodesIndexed).toBe(1);
+      const afterNode = tmpStore.getNode('A.md')!;
+      expect(afterNode.content).toContain('unique-token-beta');
+      expect(afterNode.content).not.toContain('unique-token-alpha');
+      const afterEdges = tmpStore.getEdgesFrom('A.md');
+      expect(afterEdges.some(e => e.targetId.includes('C'))).toBe(true);
+      expect(afterEdges.some(e => e.targetId.includes('B'))).toBe(false);
+    } finally {
+      tmpStore.close();
+      rmSync(tmpVault, { recursive: true, force: true });
+    }
+  });
+
   it('leaves still-broken stub edges intact', async () => {
     const tmpVault = mkdtempSync(join(tmpdir(), 'kg-stub-leave-'));
     const tmpStore = new Store(':memory:');

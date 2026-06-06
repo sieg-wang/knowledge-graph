@@ -169,4 +169,43 @@ describe('resolveNodeName', () => {
     expect(matches.length).toBeGreaterThanOrEqual(2);
     expect(matches.every(m => m.matchType === 'substring')).toBe(true);
   });
+
+  // Regression: Obsidian permits a SCALAR `aliases:` (e.g. `aliases: MyAlias`),
+  // which gray-matter parses to a bare string, not an array. The alias-match
+  // loop did `(fm.aliases as string[]).some(...)` — a lie that threw
+  // "aliases.some is not a function" the moment a query fell through to the
+  // alias pass. Because resolveNodeName scans EVERY node, one malformed note
+  // bricked name resolution vault-wide (and thus nearly every MCP tool).
+  // Intent: a scalar alias must be treated as a one-element list, not crash.
+  it('does not crash when a node has a scalar (non-array) aliases value', () => {
+    store.upsertNode({
+      id: 'scalar.md', title: 'Scalar Note',
+      content: '', frontmatter: { aliases: 'Solo Alias' },
+    });
+    // Query falls through to the alias pass (no title/id match) — must not throw.
+    expect(() => resolveNodeName('Nonexistent Query', store)).not.toThrow();
+  });
+
+  it('matches a scalar aliases value as a single alias', () => {
+    store.upsertNode({
+      id: 'scalar.md', title: 'Scalar Note',
+      content: '', frontmatter: { aliases: 'Solo Alias' },
+    });
+    const matches = resolveNodeName('Solo Alias', store);
+    expect(matches).toHaveLength(1);
+    expect(matches[0].matchType).toBe('alias');
+    expect(matches[0].nodeId).toBe('scalar.md');
+  });
+
+  it('ignores non-string elements inside an aliases array without crashing', () => {
+    store.upsertNode({
+      id: 'mixed.md', title: 'Mixed Note',
+      // numbers/null are not valid alias strings but must not throw on .toLowerCase()
+      content: '', frontmatter: { aliases: [42, null, 'Good Alias'] },
+    });
+    expect(() => resolveNodeName('Nonexistent Query', store)).not.toThrow();
+    const matches = resolveNodeName('Good Alias', store);
+    expect(matches).toHaveLength(1);
+    expect(matches[0].matchType).toBe('alias');
+  });
 });

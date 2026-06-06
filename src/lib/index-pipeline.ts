@@ -57,7 +57,12 @@ export class IndexPipeline {
       const mtime = fileStat.mtimeMs;
       const prevMtime = this.store.getSyncMtime(node.id);
 
-      if (prevMtime !== undefined && prevMtime >= mtime) {
+      // Skip only when the mtime is UNCHANGED. The previous `prevMtime >= mtime`
+      // check skipped files whose mtime DECREASED — but git checkout, cp -p
+      // restore, rsync, and Dropbox routinely backdate a CHANGED file's mtime
+      // to <= the recorded value, which then silently retained stale content,
+      // edges, and embeddings. Any mtime difference (up or down) must re-index.
+      if (prevMtime !== undefined && prevMtime === mtime) {
         stats.nodesSkipped++;
         continue;
       }

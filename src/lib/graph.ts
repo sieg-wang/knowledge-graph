@@ -228,7 +228,14 @@ export class KnowledgeGraph {
       const tagCounts = new Map<string, number>();
       for (const nid of nodeIds) {
         const node = this.store.getNode(nid);
-        const tags: string[] = (node?.frontmatter?.tags as string[]) ?? [];
+        // Mirror index-pipeline.ts's guard: a note can carry non-array
+        // `tags:` frontmatter (e.g. `tags: 42`), which round-trips through the
+        // store as a scalar. `for...of` over a non-array throws "not iterable"
+        // and — since detectCommunities runs at the end of every index() —
+        // aborted the whole run after all upsert/embedding work was done.
+        const tags: string[] = Array.isArray(node?.frontmatter?.tags)
+          ? (node.frontmatter.tags as unknown[]).filter((t): t is string => typeof t === 'string')
+          : [];
         for (const tag of tags) tagCounts.set(tag, (tagCounts.get(tag) ?? 0) + 1);
       }
       const topTags = [...tagCounts.entries()]

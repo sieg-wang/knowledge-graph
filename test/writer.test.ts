@@ -1,10 +1,12 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
 import { mkdtempSync, readFileSync, existsSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { cpSync } from 'fs';
 import { VaultWriter } from '../src/lib/writer.js';
 import { Store } from '../src/lib/store.js';
+import { Embedder } from '../src/lib/embedder.js';
+import { Search } from '../src/lib/search.js';
 
 const FIXTURE_VAULT = join(import.meta.dirname, 'fixtures', 'vault');
 
@@ -25,8 +27,8 @@ describe('VaultWriter', () => {
   });
 
   describe('createNode', () => {
-    it('creates a new markdown file with frontmatter', () => {
-      writer.createNode({
+    it('creates a new markdown file with frontmatter', async () => {
+      await writer.createNode({
         title: 'New Concept',
         directory: 'Concepts',
         frontmatter: { type: 'concept', tags: ['test'] },
@@ -42,8 +44,8 @@ describe('VaultWriter', () => {
       expect(raw).toContain('This is a new concept about testing.');
     });
 
-    it('indexes the new node in the store', () => {
-      writer.createNode({
+    it('indexes the new node in the store', async () => {
+      await writer.createNode({
         title: 'New Concept',
         directory: 'Concepts',
         frontmatter: { type: 'concept' },
@@ -55,8 +57,8 @@ describe('VaultWriter', () => {
       expect(node!.title).toBe('New Concept');
     });
 
-    it('creates directories that do not exist', () => {
-      writer.createNode({
+    it('creates directories that do not exist', async () => {
+      await writer.createNode({
         title: 'Fresh Note',
         directory: 'NewDir',
         frontmatter: {},
@@ -67,8 +69,8 @@ describe('VaultWriter', () => {
       expect(existsSync(filePath)).toBe(true);
     });
 
-    it('creates at vault root when no directory specified', () => {
-      writer.createNode({
+    it('creates at vault root when no directory specified', async () => {
+      await writer.createNode({
         title: 'Root Note',
         frontmatter: {},
         content: 'At the root.',
@@ -78,78 +80,78 @@ describe('VaultWriter', () => {
       expect(existsSync(filePath)).toBe(true);
     });
 
-    it('throws if the file already exists', () => {
-      expect(() => writer.createNode({
+    it('throws if the file already exists', async () => {
+      await expect(writer.createNode({
         title: 'Alice Smith',
         directory: 'People',
         frontmatter: {},
         content: 'Duplicate.',
-      })).toThrow(/already exists/);
+      })).rejects.toThrow(/already exists/);
     });
 
     // Regression: title comes from LLM/CLI input. Previously a title of
     // `../../etc/passwd` or `Foo/Bar` silently wrote outside the vault or
     // into an unintended subdirectory.
-    it('rejects a title with a forward slash', () => {
-      expect(() => writer.createNode({
+    it('rejects a title with a forward slash', async () => {
+      await expect(writer.createNode({
         title: 'foo/bar',
         frontmatter: {},
         content: 'x',
-      })).toThrow(/Unsafe title/);
+      })).rejects.toThrow(/Unsafe title/);
     });
 
-    it('rejects a title with a backslash', () => {
-      expect(() => writer.createNode({
+    it('rejects a title with a backslash', async () => {
+      await expect(writer.createNode({
         title: 'foo\\bar',
         frontmatter: {},
         content: 'x',
-      })).toThrow(/Unsafe title/);
+      })).rejects.toThrow(/Unsafe title/);
     });
 
-    it('rejects a title equal to ".." (parent directory)', () => {
-      expect(() => writer.createNode({
+    it('rejects a title equal to ".." (parent directory)', async () => {
+      await expect(writer.createNode({
         title: '..',
         frontmatter: {},
         content: 'x',
-      })).toThrow(/Unsafe title/);
+      })).rejects.toThrow(/Unsafe title/);
     });
 
-    it('rejects a title with control characters', () => {
-      expect(() => writer.createNode({
+    it('rejects a title with control characters', async () => {
+      await expect(writer.createNode({
         title: 'foo\x00bar',
         frontmatter: {},
         content: 'x',
-      })).toThrow(/Unsafe title/);
+      })).rejects.toThrow(/Unsafe title/);
     });
 
-    it('rejects an empty title', () => {
-      expect(() => writer.createNode({
+    it('rejects an empty title', async () => {
+      await expect(writer.createNode({
         title: '',
         frontmatter: {},
         content: 'x',
-      })).toThrow(/Unsafe title/);
+      })).rejects.toThrow(/Unsafe title/);
     });
 
-    it('rejects a directory containing "../"', () => {
-      expect(() => writer.createNode({
+    it('rejects a directory containing "../"', async () => {
+      await expect(writer.createNode({
         title: 'Ok',
         directory: '../escape',
         frontmatter: {},
         content: 'x',
-      })).toThrow(/Unsafe directory/);
+      })).rejects.toThrow(/Unsafe directory/);
     });
 
-    it('rejects an absolute directory', () => {
-      expect(() => writer.createNode({
+    it('rejects an absolute directory', async () => {
+      await expect(writer.createNode({
         title: 'Ok',
         directory: '/etc',
         frontmatter: {},
         content: 'x',
-      })).toThrow(/Unsafe directory/);
+      })).rejects.toThrow(/Unsafe directory/);
     });
 
-    it('still accepts a nested directory path without parent refs', () => {
-      writer.createNode({
+    it('still accepts a nested directory path without parent refs', async () => {
+      await writer.createNode({
         title: 'Inside',
         directory: 'a/b/c',
         frontmatter: {},
@@ -162,11 +164,11 @@ describe('VaultWriter', () => {
     // crash mid-write would leave a partially-written <title>.md behind that
     // the next IndexPipeline pass would treat as a real, corrupt node. The
     // fix is a tmp-file + rename publish (POSIX-atomic on the same fs).
-    it('publishes via tmp+rename so no partial file is left under the final name', () => {
+    it('publishes via tmp+rename so no partial file is left under the final name', async () => {
       const dir = join(tempVault, 'Concepts');
       const before = readdirSync(dir);
 
-      writer.createNode({
+      await writer.createNode({
         title: 'Atomic Concept',
         directory: 'Concepts',
         frontmatter: { type: 'concept' },
@@ -186,17 +188,17 @@ describe('VaultWriter', () => {
   });
 
   describe('annotateNode', () => {
-    it('appends content to an existing file', () => {
-      writer.annotateNode('People/Alice Smith.md', '\n## Agent Notes\nAlice is a key connector.');
+    it('appends content to an existing file', async () => {
+      await writer.annotateNode('People/Alice Smith.md', '\n## Agent Notes\nAlice is a key connector.');
 
       const raw = readFileSync(join(tempVault, 'People', 'Alice Smith.md'), 'utf-8');
       expect(raw).toContain('## Agent Notes');
       expect(raw).toContain('Alice is a key connector.');
     });
 
-    it('re-indexes the node in the store after annotation', () => {
+    it('re-indexes the node in the store after annotation', async () => {
       // First index the original
-      writer.createNode({
+      await writer.createNode({
         title: 'Temp Note',
         frontmatter: {},
         content: 'Original content.',
@@ -204,39 +206,39 @@ describe('VaultWriter', () => {
       const before = store.getNode('Temp Note.md');
       expect(before!.content).toContain('Original content.');
 
-      writer.annotateNode('Temp Note.md', '\n\nAppended content.');
+      await writer.annotateNode('Temp Note.md', '\n\nAppended content.');
       const after = store.getNode('Temp Note.md');
       expect(after!.content).toContain('Appended content.');
     });
 
-    it('throws if the node does not exist', () => {
-      expect(() => writer.annotateNode('nonexistent.md', 'stuff')).toThrow(/not found/);
+    it('throws if the node does not exist', async () => {
+      await expect(writer.annotateNode('nonexistent.md', 'stuff')).rejects.toThrow(/not found/);
     });
   });
 
   describe('addLink', () => {
-    it('appends a wiki link to the source file', () => {
-      writer.createNode({
+    it('appends a wiki link to the source file', async () => {
+      await writer.createNode({
         title: 'Source',
         frontmatter: {},
         content: 'Some content.',
       });
 
-      writer.addLink('Source.md', 'People/Alice Smith', 'Related to Alice.');
+      await writer.addLink('Source.md', 'People/Alice Smith', 'Related to Alice.');
 
       const raw = readFileSync(join(tempVault, 'Source.md'), 'utf-8');
       expect(raw).toContain('[[People/Alice Smith]]');
       expect(raw).toContain('Related to Alice.');
     });
 
-    it('creates an edge in the store', () => {
-      writer.createNode({
+    it('creates an edge in the store', async () => {
+      await writer.createNode({
         title: 'Source',
         frontmatter: {},
         content: 'Some content.',
       });
 
-      writer.addLink('Source.md', 'People/Alice Smith', 'Related to Alice.');
+      await writer.addLink('Source.md', 'People/Alice Smith', 'Related to Alice.');
 
       // Unknown targets now route through the parser-compatible `_stub/`
       // prefix so IndexPipeline.reconciliation can later rewrite the edge
@@ -246,8 +248,8 @@ describe('VaultWriter', () => {
       expect(edges.some(e => e.targetId === '_stub/People/Alice Smith.md')).toBe(true);
     });
 
-    it('resolves target by title to full node ID', () => {
-      writer.createNode({
+    it('resolves target by title to full node ID', async () => {
+      await writer.createNode({
         title: 'Source',
         frontmatter: {},
         content: 'Some content.',
@@ -261,20 +263,20 @@ describe('VaultWriter', () => {
       });
 
       // Link by title only — should resolve to "Concepts/Widget Theory.md"
-      writer.addLink('Source.md', 'Widget Theory', 'Uses widget theory.');
+      await writer.addLink('Source.md', 'Widget Theory', 'Uses widget theory.');
 
       const edges = store.getEdgesFrom('Source.md');
       expect(edges.some(e => e.targetId === 'Concepts/Widget Theory.md')).toBe(true);
     });
 
-    it('uses _stub/ prefix for unknown targets (matches parser semantics)', () => {
-      writer.createNode({
+    it('uses _stub/ prefix for unknown targets (matches parser semantics)', async () => {
+      await writer.createNode({
         title: 'Source',
         frontmatter: {},
         content: 'Some content.',
       });
 
-      writer.addLink('Source.md', 'Unknown Target', 'Linked to unknown.');
+      await writer.addLink('Source.md', 'Unknown Target', 'Linked to unknown.');
 
       const edges = store.getEdgesFrom('Source.md');
       expect(edges.some(e => e.targetId === '_stub/Unknown Target.md')).toBe(true);
@@ -285,22 +287,22 @@ describe('VaultWriter', () => {
       expect(store.getNode('_stub/Unknown Target.md')).toBeDefined();
     });
 
-    it('preserves .md extension when constructing stub ID for unknown targets', () => {
-      writer.createNode({
+    it('preserves .md extension when constructing stub ID for unknown targets', async () => {
+      await writer.createNode({
         title: 'Source',
         frontmatter: {},
         content: 'Some content.',
       });
 
-      writer.addLink('Source.md', 'Unknown.md', 'Link context.');
+      await writer.addLink('Source.md', 'Unknown.md', 'Link context.');
 
       const edges = store.getEdgesFrom('Source.md');
       expect(edges.some(e => e.targetId === '_stub/Unknown.md')).toBe(true);
       expect(store.getNode('_stub/Unknown.md')).toBeDefined();
     });
 
-    it('does NOT use _stub/ prefix when target resolves to an existing node', () => {
-      writer.createNode({
+    it('does NOT use _stub/ prefix when target resolves to an existing node', async () => {
+      await writer.createNode({
         title: 'Source',
         frontmatter: {},
         content: 'Some content.',
@@ -312,7 +314,7 @@ describe('VaultWriter', () => {
         frontmatter: {},
       });
 
-      writer.addLink('Source.md', 'Bob', 'Hi Bob.');
+      await writer.addLink('Source.md', 'Bob', 'Hi Bob.');
 
       const edges = store.getEdgesFrom('Source.md');
       // Resolved targets bypass the stub prefix entirely.
@@ -320,8 +322,8 @@ describe('VaultWriter', () => {
       expect(edges.some(e => e.targetId.startsWith('_stub/'))).toBe(false);
     });
 
-    it('picks first match when target resolves ambiguously', () => {
-      writer.createNode({
+    it('picks first match when target resolves ambiguously', async () => {
+      await writer.createNode({
         title: 'Source',
         frontmatter: {},
         content: 'Some content.',
@@ -330,112 +332,109 @@ describe('VaultWriter', () => {
       store.upsertNode({ id: 'b.md', title: 'Beta Smith', content: '', frontmatter: {} });
 
       // Should pick first substring match without throwing
-      writer.addLink('Source.md', 'Smith', 'Linked to Smith.');
+      await writer.addLink('Source.md', 'Smith', 'Linked to Smith.');
 
       const edges = store.getEdgesFrom('Source.md');
       expect(edges.length).toBeGreaterThan(0);
     });
 
-    it('throws if source node file does not exist', () => {
-      expect(() => writer.addLink('nonexistent.md', 'target', 'context')).toThrow(/not found/);
+    it('throws if source node file does not exist', async () => {
+      await expect(writer.addLink('nonexistent.md', 'target', 'context')).rejects.toThrow(/not found/);
     });
 
     // ── Codex review #11: wiki-link injection via unescaped target/context ──
 
-    it('rejects target containing `]]` (would break out of wiki-link)', () => {
-      writer.createNode({ title: 'Source', frontmatter: {}, content: 'x' });
-      expect(() =>
+    it('rejects target containing `]]` (would break out of wiki-link)', async () => {
+      await writer.createNode({ title: 'Source', frontmatter: {}, content: 'x' });
+      await expect(
         writer.addLink('Source.md', 'foo]] [[malicious', 'context'),
-      ).toThrow(/Unsafe link target/);
+      ).rejects.toThrow(/Unsafe link target/);
     });
 
-    it('rejects target containing `[[` (would nest wiki-links)', () => {
-      writer.createNode({ title: 'Source', frontmatter: {}, content: 'x' });
-      expect(() =>
+    it('rejects target containing `[[` (would nest wiki-links)', async () => {
+      await writer.createNode({ title: 'Source', frontmatter: {}, content: 'x' });
+      await expect(
         writer.addLink('Source.md', 'foo [[bar', 'context'),
-      ).toThrow(/Unsafe link target/);
+      ).rejects.toThrow(/Unsafe link target/);
     });
 
-    it('rejects target containing newline (would split lines)', () => {
-      writer.createNode({ title: 'Source', frontmatter: {}, content: 'x' });
-      expect(() =>
+    it('rejects target containing newline (would split lines)', async () => {
+      await writer.createNode({ title: 'Source', frontmatter: {}, content: 'x' });
+      await expect(
         writer.addLink('Source.md', 'foo\nbar', 'context'),
-      ).toThrow(/Unsafe link target/);
+      ).rejects.toThrow(/Unsafe link target/);
     });
 
-    it('rejects target containing `|` (wiki-link alias delimiter)', () => {
-      writer.createNode({ title: 'Source', frontmatter: {}, content: 'x' });
-      expect(() =>
+    it('rejects target containing `|` (wiki-link alias delimiter)', async () => {
+      await writer.createNode({ title: 'Source', frontmatter: {}, content: 'x' });
+      await expect(
         writer.addLink('Source.md', 'foo|alias', 'context'),
-      ).toThrow(/Unsafe link target/);
+      ).rejects.toThrow(/Unsafe link target/);
     });
 
-    it('rejects empty target', () => {
-      writer.createNode({ title: 'Source', frontmatter: {}, content: 'x' });
-      expect(() =>
+    it('rejects empty target', async () => {
+      await writer.createNode({ title: 'Source', frontmatter: {}, content: 'x' });
+      await expect(
         writer.addLink('Source.md', '', 'context'),
-      ).toThrow(/Unsafe link target/);
+      ).rejects.toThrow(/Unsafe link target/);
     });
 
-    it('rejects context containing newline (would inject extra content)', () => {
-      writer.createNode({ title: 'Source', frontmatter: {}, content: 'x' });
-      expect(() =>
+    it('rejects context containing newline (would inject extra content)', async () => {
+      await writer.createNode({ title: 'Source', frontmatter: {}, content: 'x' });
+      await expect(
         writer.addLink('Source.md', 'Target', 'line1\n\n## Injected heading'),
-      ).toThrow(/Unsafe link context/);
+      ).rejects.toThrow(/Unsafe link context/);
     });
 
     // ── Codex review #5 (2026-05-03): context cannot smuggle in extra wiki-links ──
 
-    it('rejects context containing `[[` (would create phantom edge on reparse)', () => {
-      writer.createNode({ title: 'Source', frontmatter: {}, content: 'x' });
-      expect(() =>
+    it('rejects context containing `[[` (would create phantom edge on reparse)', async () => {
+      await writer.createNode({ title: 'Source', frontmatter: {}, content: 'x' });
+      await expect(
         writer.addLink('Source.md', 'Target', 'see also [[Other Node]] for more'),
-      ).toThrow(/Unsafe link context/);
+      ).rejects.toThrow(/Unsafe link context/);
     });
 
-    it('rejects context containing `]]` alone (closing bracket leak)', () => {
-      writer.createNode({ title: 'Source', frontmatter: {}, content: 'x' });
-      expect(() =>
+    it('rejects context containing `]]` alone (closing bracket leak)', async () => {
+      await writer.createNode({ title: 'Source', frontmatter: {}, content: 'x' });
+      await expect(
         writer.addLink('Source.md', 'Target', 'cf. earlier note]]'),
-      ).toThrow(/Unsafe link context/);
+      ).rejects.toThrow(/Unsafe link context/);
     });
 
-    it('rejects context containing `|` (wiki-alias delimiter leak)', () => {
-      writer.createNode({ title: 'Source', frontmatter: {}, content: 'x' });
-      expect(() =>
+    it('rejects context containing `|` (wiki-alias delimiter leak)', async () => {
+      await writer.createNode({ title: 'Source', frontmatter: {}, content: 'x' });
+      await expect(
         writer.addLink('Source.md', 'Target', 'tagged | important'),
-      ).toThrow(/Unsafe link context/);
+      ).rejects.toThrow(/Unsafe link context/);
     });
 
-    it('error message points operator to annotateNode for arbitrary markdown', () => {
-      writer.createNode({ title: 'Source', frontmatter: {}, content: 'x' });
-      try {
-        writer.addLink('Source.md', 'Target', 'has [[bad]] context');
-        expect.fail('expected throw');
-      } catch (err) {
-        expect((err as Error).message).toMatch(/annotateNode/);
-      }
+    it('error message points operator to annotateNode for arbitrary markdown', async () => {
+      await writer.createNode({ title: 'Source', frontmatter: {}, content: 'x' });
+      await expect(
+        writer.addLink('Source.md', 'Target', 'has [[bad]] context'),
+      ).rejects.toThrow(/annotateNode/);
     });
 
-    it('accepts target with forward slashes (folder-nested refs are valid)', () => {
-      writer.createNode({ title: 'Source', frontmatter: {}, content: 'x' });
+    it('accepts target with forward slashes (folder-nested refs are valid)', async () => {
+      await writer.createNode({ title: 'Source', frontmatter: {}, content: 'x' });
       // Slashes allowed — wiki refs like "People/Alice" are first-class.
-      expect(() =>
+      await expect(
         writer.addLink('Source.md', 'People/Alice Smith', 'A note.'),
-      ).not.toThrow();
+      ).resolves.not.toThrow();
     });
 
-    it('accepts context with markdown punctuation but no newlines', () => {
-      writer.createNode({ title: 'Source', frontmatter: {}, content: 'x' });
+    it('accepts context with markdown punctuation but no newlines', async () => {
+      await writer.createNode({ title: 'Source', frontmatter: {}, content: 'x' });
       // Plain markdown text (asterisks, parens, hyphens) must still pass.
-      expect(() =>
+      await expect(
         writer.addLink('Source.md', 'Target', '*emphasized* (with parens) — and dashes.'),
-      ).not.toThrow();
+      ).resolves.not.toThrow();
     });
 
     // ── Codex review #10: indexFile applies sanitizeFrontmatter ──
 
-    it('strips prototype-pollution keys when re-indexing via writer paths', () => {
+    it('strips prototype-pollution keys when re-indexing via writer paths', async () => {
       // Create a file directly with a hostile frontmatter, bypassing
       // createNode's own input validation. annotateNode → indexFile is the
       // path that previously skipped sanitization.
@@ -448,7 +447,7 @@ describe('VaultWriter', () => {
       );
 
       // Index via writer's annotate path (calls private indexFile).
-      writer.annotateNode('Evil.md', '\nappended.\n');
+      await writer.annotateNode('Evil.md', '\nappended.\n');
 
       const node = store.getNode('Evil.md');
       expect(node).toBeDefined();
@@ -457,6 +456,67 @@ describe('VaultWriter', () => {
       expect(Object.prototype.hasOwnProperty.call(fm, 'constructor')).toBe(false);
       expect(Object.prototype.hasOwnProperty.call(fm, 'prototype')).toBe(false);
       expect(fm.legit).toBe('keep_me');
+    });
+  });
+
+  // ── Finding 3: nodes created/annotated via the writer must be embedded so
+  // they are immediately returnable by semantic search (the MCP default),
+  // not invisible until a full re-index. Uses the real embedder (matches
+  // search.test.ts / index-pipeline.test.ts), so embeddings round-trip
+  // through nodes_vec exactly as kg_search would query them.
+  describe('embedding on write (semantic searchability)', () => {
+    let embedder: Embedder;
+
+    beforeAll(async () => {
+      embedder = new Embedder();
+      await embedder.init();
+    }, 60000);
+
+    afterAll(async () => {
+      await embedder.dispose();
+    });
+
+    it('createNode embeds the node so semantic search returns it without a re-index', async () => {
+      const w = new VaultWriter(tempVault, store, embedder);
+      await w.createNode({
+        title: 'Quantum Entanglement',
+        directory: 'Concepts',
+        frontmatter: { type: 'concept' },
+        content: 'Two particles remain correlated across any distance.',
+      });
+
+      const search = new Search(store, embedder);
+      const results = await search.semantic('quantum entanglement correlated particles');
+      expect(results.some(r => r.nodeId === 'Concepts/Quantum Entanglement.md')).toBe(true);
+    });
+
+    it('annotateNode refreshes the embedding so appended content is searchable', async () => {
+      const w = new VaultWriter(tempVault, store, embedder);
+      await w.createNode({
+        title: 'Sparse Note',
+        frontmatter: {},
+        content: 'Placeholder.',
+      });
+
+      await w.annotateNode('Sparse Note.md', '\n\nPhotosynthesis converts sunlight into chemical energy in chloroplasts.');
+
+      const search = new Search(store, embedder);
+      const results = await search.semantic('photosynthesis sunlight chloroplasts chemical energy');
+      expect(results.some(r => r.nodeId === 'Sparse Note.md')).toBe(true);
+    });
+
+    it('without an embedder, createNode still writes the node but skips embedding (back-compat)', async () => {
+      // No embedder injected — node is FTS/graph indexed but has no vector row.
+      const plain = new VaultWriter(tempVault, store);
+      await plain.createNode({
+        title: 'No Vector Note',
+        frontmatter: {},
+        content: 'This node has no embedding.',
+      });
+      expect(store.getNode('No Vector Note.md')).toBeDefined();
+      // It is full-text searchable...
+      const fts = store.searchFullText('embedding');
+      expect(fts.some(r => r.nodeId === 'No Vector Note.md')).toBe(true);
     });
   });
 });

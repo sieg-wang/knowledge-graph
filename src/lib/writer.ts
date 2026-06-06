@@ -10,6 +10,7 @@ import {
 import { join, basename } from 'path';
 import matter from 'gray-matter';
 import type { Store } from './store.js';
+import { Embedder } from './embedder.js';
 import { resolveNodeName } from './resolve.js';
 import { sanitizeFrontmatter } from './parser.js';
 
@@ -75,12 +76,19 @@ function assertSafeDirectory(directory: string | undefined): void {
 }
 
 export class VaultWriter {
+  // The embedder is optional so unit tests (and any caller that only needs
+  // FTS/graph writes) can construct a writer without loading the model. When
+  // present, indexFile computes + upserts the node's embedding so a node
+  // created/annotated via MCP is immediately semantic-searchable — previously
+  // only IndexPipeline.index embedded, so kg_create_node then kg_search
+  // (semantic is the default) returned nothing until a full re-index.
   constructor(
     private vaultPath: string,
     private store: Store,
+    private embedder?: Embedder,
   ) {}
 
-  createNode(opts: CreateNodeOptions): string {
+  async createNode(opts: CreateNodeOptions): Promise<string> {
     assertSafeTitle(opts.title);
     assertSafeDirectory(opts.directory);
 
@@ -115,12 +123,12 @@ export class VaultWriter {
     }
 
     // Index in store
-    this.indexFile(relPath);
+    await this.indexFile(relPath);
 
     return relPath;
   }
 
-  annotateNode(nodeId: string, content: string): void {
+  async annotateNode(nodeId: string, content: string): Promise<void> {
     const absPath = join(this.vaultPath, nodeId);
     if (!existsSync(absPath)) {
       throw new Error(`Node not found: ${nodeId}`);
@@ -129,10 +137,10 @@ export class VaultWriter {
     appendFileSync(absPath, content, 'utf-8');
 
     // Re-index
-    this.indexFile(nodeId);
+    await this.indexFile(nodeId);
   }
 
-  addLink(sourceId: string, targetRef: string, context: string): void {
+  async addLink(sourceId: string, targetRef: string, context: string): Promise<void> {
     const absPath = join(this.vaultPath, sourceId);
     if (!existsSync(absPath)) {
       throw new Error(`Source node not found: ${sourceId}`);
@@ -157,7 +165,7 @@ export class VaultWriter {
     appendFileSync(absPath, line, 'utf-8');
 
     // Re-index source node
-    this.indexFile(sourceId);
+    await this.indexFile(sourceId);
 
     // Resolve target to actual node ID. Unknown targets must use the same
     // `_stub/` prefix the parser uses (parser.ts emits `_stub/<name>.md`),
@@ -191,7 +199,7 @@ export class VaultWriter {
     });
   }
 
-  private indexFile(relPath: string): void {
+  private async indexFile(relPath: string): Promise<void> {
     const absPath = join(this.vaultPath, relPath);
     const raw = readFileSync(absPath, 'utf-8');
 
@@ -219,5 +227,17 @@ export class VaultWriter {
       content,
       frontmatter: fm,
     });
+
+    // Compute + store the embedding so the node is immediately returnable by
+    // semantic search (kg_search's default mode). Mirrors IndexPipeline's
+    // embedding path: same buildEmbeddingText(title, tags, content) input.
+    if (this.embedder) {
+      const tags = Array.isArray(fm.tags)
+        ? (fm.tags as unknown[]).filter((t): t is string => typeof t === 'string')
+        : [];
+      const text = Embedder.buildEmbeddingText(title, tags, content);
+      const embedding = await this.embedder.embed(text);
+      this.store.upsertEmbedding(relPath, embedding);
+    }
   }
 }

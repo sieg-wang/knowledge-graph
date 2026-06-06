@@ -52,7 +52,16 @@ export function resolveNodeName(name: string, store: Store): NameMatch[] {
   for (const n of allNodes) {
     let fm: Record<string, unknown>;
     try { fm = JSON.parse(n.frontmatter); } catch { fm = {}; }
-    const aliases: string[] = fm.aliases as string[] ?? [];
+    // Obsidian permits a scalar `aliases: MyAlias` (gray-matter → string),
+    // and arrays can contain non-string elements (numbers/null). Normalize
+    // to a string[] before matching so one malformed note can't crash the
+    // whole alias pass (and with it nearly every MCP tool / CLI subcommand).
+    const rawAliases = fm.aliases;
+    const aliases: string[] = Array.isArray(rawAliases)
+      ? rawAliases.filter((a): a is string => typeof a === 'string')
+      : typeof rawAliases === 'string'
+        ? [rawAliases]
+        : [];
     if (aliases.some(a => a.toLowerCase() === lower)) {
       aliasMatches.push({ nodeId: n.id, title: n.title, matchType: 'alias' });
     }

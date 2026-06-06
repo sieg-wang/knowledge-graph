@@ -9,6 +9,7 @@ import { KnowledgeGraph } from '../lib/graph.js';
 import { Search } from '../lib/search.js';
 import { requireMatch as requireMatchBase } from '../lib/resolve.js';
 import { VaultWriter } from '../lib/writer.js';
+import { makeEnsureEmbedder } from '../lib/ensure-embedder.js';
 import { mkdirSync } from 'fs';
 
 const config = resolveConfig({});
@@ -17,9 +18,9 @@ mkdirSync(config.dataDir, { recursive: true });
 const store = new Store(config.dbPath);
 const embedder = new Embedder();
 const search = new Search(store, embedder);
-const writer = new VaultWriter(config.vaultPath, store);
-let embedderReady = false;
+const writer = new VaultWriter(config.vaultPath, store, embedder);
 let cachedGraph: KnowledgeGraph | null = null;
+const ensureEmbedder = makeEnsureEmbedder(embedder);
 
 function getGraph(): KnowledgeGraph {
   if (!cachedGraph) {
@@ -42,7 +43,7 @@ server.tool(
   'Parse vault and build/update the knowledge graph',
   { resolution: z.number().positive().optional().describe('Louvain resolution parameter (default 1.0)') },
   async ({ resolution }) => {
-    if (!embedderReady) { await embedder.init(); embedderReady = true; }
+    await ensureEmbedder();
     const pipeline = new IndexPipeline(store, embedder);
     const stats = await pipeline.index(config.vaultPath, resolution ?? 1.0);
     cachedGraph = null; // Invalidate — graph structure changed
@@ -123,7 +124,7 @@ server.tool(
     if (fulltext) {
       results = store.searchFullText(query).slice(0, limit ?? 20);
     } else {
-      if (!embedderReady) { await embedder.init(); embedderReady = true; }
+      await ensureEmbedder();
       results = await search.semantic(query, limit ?? 20);
     }
     return { content: [{ type: 'text', text: JSON.stringify(results, null, 2) }] };
@@ -250,7 +251,8 @@ server.tool(
     frontmatter: z.record(z.string(), z.unknown()).optional().describe('YAML frontmatter fields (type, tags, status, related, etc.)'),
   },
   async ({ title, directory, content, frontmatter }) => {
-    const relPath = writer.createNode({
+    await ensureEmbedder();
+    const relPath = await writer.createNode({
       title,
       directory,
       frontmatter: frontmatter ?? {},
@@ -270,7 +272,8 @@ server.tool(
   },
   async ({ name, content }) => {
     const nodeId = requireMatch(name);
-    writer.annotateNode(nodeId, content);
+    await ensureEmbedder();
+    await writer.annotateNode(nodeId, content);
     cachedGraph = null;
     return { content: [{ type: 'text', text: JSON.stringify({ annotated: nodeId }, null, 2) }] };
   }
@@ -286,7 +289,8 @@ server.tool(
   },
   async ({ source, target, context }) => {
     const sourceId = requireMatch(source);
-    writer.addLink(sourceId, target, context);
+    await ensureEmbedder();
+    await writer.addLink(sourceId, target, context);
     cachedGraph = null;
     return { content: [{ type: 'text', text: JSON.stringify({ linked: { from: sourceId, to: target } }, null, 2) }] };
   }

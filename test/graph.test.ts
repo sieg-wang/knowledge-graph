@@ -148,6 +148,39 @@ describe('KnowledgeGraph', () => {
     isolatedStore.close();
   });
 
+  // Regression: a note with non-array `tags:` frontmatter (e.g. `tags: 42`)
+  // survives the store round-trip as a scalar. detectCommunities did
+  // `for (const tag of (node.frontmatter.tags as string[]))`, which throws
+  // "X is not iterable" on a number/string. Because detectCommunities runs at
+  // the END of every index() after all upsert/embedding work, the whole index
+  // run failed post-work with a stack trace. index-pipeline.ts:68 already
+  // guards this for the embedding path; graph.ts must mirror that guard.
+  it('detectCommunities does not crash when a node has non-array tags', () => {
+    const s = new Store(':memory:');
+    s.upsertNode({ id: 'a.md', title: 'A', content: '', frontmatter: { tags: 42 } });
+    s.upsertNode({ id: 'b.md', title: 'B', content: '', frontmatter: { tags: 'solo' } });
+    s.insertEdge({ sourceId: 'a.md', targetId: 'b.md', context: 'link' });
+    const g = KnowledgeGraph.fromStore(s);
+    expect(() => g.detectCommunities()).not.toThrow();
+    s.close();
+  });
+
+  it('detectCommunities still aggregates valid string tags', () => {
+    const s = new Store(':memory:');
+    // Two connected nodes sharing the tag "shared" plus one malformed node.
+    s.upsertNode({ id: 'a.md', title: 'A', content: '', frontmatter: { tags: ['shared'] } });
+    s.upsertNode({ id: 'b.md', title: 'B', content: '', frontmatter: { tags: ['shared'] } });
+    s.upsertNode({ id: 'c.md', title: 'C', content: '', frontmatter: { tags: 99 } });
+    s.insertEdge({ sourceId: 'a.md', targetId: 'b.md', context: 'link' });
+    s.insertEdge({ sourceId: 'b.md', targetId: 'c.md', context: 'link' });
+    const g = KnowledgeGraph.fromStore(s);
+    const communities = g.detectCommunities();
+    // The community containing a.md/b.md must surface the "shared" tag in its summary.
+    const withTag = communities.find(comm => comm.summary.includes('shared'));
+    expect(withTag).toBeDefined();
+    s.close();
+  });
+
   // Regression: DFS was unbounded. On a dense graph with a hub node, maxDepth=3
   // could enumerate millions of paths and OOM the MCP process. The cap makes
   // the return bounded and still useful.
