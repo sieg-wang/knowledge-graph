@@ -67,6 +67,36 @@ describe('parseVault', () => {
     expect(bad.content).toContain('Bad Frontmatter');
   });
 
+  // Regression: `title:` frontmatter is user-authored YAML and can be an
+  // array / number / empty string. The unguarded `fm.title as string` let a
+  // non-string flow into Store.upsertNode, where better-sqlite3 cannot bind
+  // it — ONE malformed note aborted the entire pipeline.index() run mid-way
+  // (partial DB state, stale communities). The suite already guards the
+  // identical failure class for `tags:` (graph.test.ts) and `aliases:`
+  // (resolve.test.ts) but missed `title:`. Non-string titles must fall back
+  // to the filename, exactly like a missing title does.
+  it('falls back to filename when title frontmatter is not a string', async () => {
+    const tmpVault = mkdtempSync(join(tmpdir(), 'kg-parser-title-'));
+    try {
+      writeFileSync(
+        join(tmpVault, 'array-title.md'),
+        '---\ntitle:\n  - part1\n  - part2\n---\nbody\n',
+        'utf-8',
+      );
+      writeFileSync(join(tmpVault, 'number-title.md'), '---\ntitle: 42\n---\nbody\n', 'utf-8');
+      writeFileSync(join(tmpVault, 'null-title.md'), '---\ntitle:\n---\nbody\n', 'utf-8');
+      writeFileSync(join(tmpVault, 'blank-title.md'), '---\ntitle: ""\n---\nbody\n', 'utf-8');
+
+      const { nodes } = await parseVault(tmpVault);
+      expect(nodes.find(n => n.id === 'array-title.md')!.title).toBe('array-title');
+      expect(nodes.find(n => n.id === 'number-title.md')!.title).toBe('number-title');
+      expect(nodes.find(n => n.id === 'null-title.md')!.title).toBe('null-title');
+      expect(nodes.find(n => n.id === 'blank-title.md')!.title).toBe('blank-title');
+    } finally {
+      rmSync(tmpVault, { recursive: true, force: true });
+    }
+  });
+
   // Regression: YAML frontmatter is user-authored. A payload like
   // `__proto__: { polluted: true }` would flow through Store.upsertNode and
   // downstream object-spread sites, mutating Object.prototype for the whole

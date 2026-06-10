@@ -124,6 +124,50 @@ describe('IndexPipeline', () => {
     }
   });
 
+  // Regression (mirror of the test above, in the DELETE direction): when a
+  // linked target file is deleted, deleteNode() drops the linker's A→B edge
+  // wholesale, but the unchanged linker is then SKIPPED by the mtime check —
+  // so its freshly-parsed `A → _stub/B.md` edge was never inserted. The link
+  // silently vanished (backlinks/paths/communities lose the connection with
+  // no error) while the orphan `_stub/B.md` node was still created.
+  it('converts linker edges to stub edges when the linked file is deleted', async () => {
+    const tmpVault = mkdtempSync(join(tmpdir(), 'kg-stub-delete-'));
+    const tmpStore = new Store(':memory:');
+    const tmpPipeline = new IndexPipeline(tmpStore, embedder);
+
+    try {
+      // Step 1: A.md links to B.md, both exist. Pin A's mtime to a fixed
+      // past second so the second pass reliably SKIPS it (see test above).
+      const aPath = join(tmpVault, 'A.md');
+      writeFileSync(aPath, '# A\n\nSee [[B]] for details.\n');
+      writeFileSync(join(tmpVault, 'B.md'), '# B\n\nB content.\n');
+      const pinnedMtime = Math.floor(Date.now() / 1000) - 3600;
+      utimesSync(aPath, pinnedMtime, pinnedMtime);
+
+      const first = await tmpPipeline.index(tmpVault);
+      expect(first.nodesIndexed).toBe(2);
+      expect(tmpStore.getEdgesFrom('A.md').some(e => e.targetId === 'B.md')).toBe(true);
+
+      // Step 2: delete B.md; A.md mtime is preserved so it skips.
+      rmSync(join(tmpVault, 'B.md'));
+      utimesSync(aPath, pinnedMtime, pinnedMtime);
+
+      const second = await tmpPipeline.index(tmpVault);
+      expect(second.nodesIndexed).toBe(0);
+      expect(second.nodesSkipped).toBe(1);
+
+      // Step 3: A's edge MUST now point at the stub — not vanish entirely.
+      const edgesAfter = tmpStore.getEdgesFrom('A.md');
+      expect(edgesAfter.some(e => e.targetId === '_stub/B.md')).toBe(true);
+      expect(edgesAfter.some(e => e.targetId === 'B.md')).toBe(false);
+      // The stub node backs the edge so graph traversal sees it.
+      expect(tmpStore.getNode('_stub/B.md')).toBeDefined();
+    } finally {
+      tmpStore.close();
+      rmSync(tmpVault, { recursive: true, force: true });
+    }
+  });
+
   it('does not double-process sources that were already re-indexed this run', async () => {
     const tmpVault = mkdtempSync(join(tmpdir(), 'kg-stub-no-double-'));
     const tmpStore = new Store(':memory:');

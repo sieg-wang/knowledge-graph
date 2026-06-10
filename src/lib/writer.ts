@@ -179,14 +179,21 @@ export class VaultWriter {
     if (matches.length > 0) {
       targetId = matches[0].nodeId;
     } else {
-      const baseName = targetRef.endsWith('.md') ? targetRef : targetRef + '.md';
-      targetId = `_stub/${baseName}`;
+      // Mirror parser semantics EXACTLY: parser.ts emits `_stub/${raw}.md`
+      // UNCONDITIONALLY for an unresolved `[[raw]]` — even when raw already
+      // ends in `.md` (the literal `[[Foo.md]]` re-parses to
+      // `_stub/Foo.md.md`). Minting a different ID here made the next
+      // IndexPipeline run misclassify the writer's stub as resolved: it
+      // deleted it, rewrote the source's edges, and re-created the
+      // parser-shaped stub — phantom stub churn on every full index.
+      targetId = `_stub/${targetRef}.md`;
       // Materialize the stub node so KnowledgeGraph.fromStore includes the
-      // edge in adjacency builds. Mirrors IndexPipeline's stub creation.
+      // edge in adjacency builds. Mirrors IndexPipeline's stub creation
+      // (whose title rule — strip prefix + first '.md' — yields targetRef).
       if (!this.store.getNode(targetId)) {
         this.store.upsertNode({
           id: targetId,
-          title: baseName.replace(/\.md$/, ''),
+          title: targetRef,
           content: '',
           frontmatter: { _stub: true },
         });
@@ -219,7 +226,11 @@ export class VaultWriter {
       content = raw;
     }
 
-    const title = (fm.title as string) ?? basename(relPath, '.md');
+    // Mirror parser.ts: non-string/blank `title:` falls back to the filename
+    // (better-sqlite3 cannot bind an array/object title in upsertNode).
+    const title = typeof fm.title === 'string' && fm.title.trim()
+      ? fm.title
+      : basename(relPath, '.md');
 
     this.store.upsertNode({
       id: relPath,

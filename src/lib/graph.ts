@@ -161,6 +161,7 @@ export class KnowledgeGraph {
   }
 
   subgraph(nodeId: string, depth: number): SubgraphResult {
+    if (!this.graph.hasNode(nodeId)) return { nodes: [], edges: [] };
     const visited = new Set<string>();
     const queue: Array<{ id: string; d: number }> = [{ id: nodeId, d: 0 }];
     visited.add(nodeId);

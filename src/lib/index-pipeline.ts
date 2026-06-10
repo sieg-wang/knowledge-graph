@@ -39,10 +39,21 @@ export class IndexPipeline {
       edgesBySource.set(edge.sourceId, list);
     }
 
-    // Detect deleted files
+    // Detect deleted files. Capture who linked TO each deleted file BEFORE
+    // deleteNode wipes those edges (it deletes WHERE source OR target) — the
+    // linkers themselves are usually mtime-unchanged and get SKIPPED below,
+    // so without the reconciliation pass further down their freshly-parsed
+    // `source → _stub/<deleted>.md` edges would never be inserted: the link
+    // silently vanished while the orphan stub node was still created. This
+    // is the exact mirror of the stub→real reconciliation below, in the
+    // real→deleted direction.
     const currentPaths = new Set(nodes.map(n => n.id));
+    const deletedLinkSources = new Set<string>();
     for (const oldPath of previousPaths) {
       if (!currentPaths.has(oldPath)) {
+        for (const edge of this.store.getEdgesTo(oldPath)) {
+          deletedLinkSources.add(edge.sourceId);
+        }
         this.store.deleteNode(oldPath);
       }
     }
@@ -109,6 +120,22 @@ export class IndexPipeline {
     // (they don't bump nodesIndexed/stubNodesCreated but still mutate the
     // graph and therefore require community recomputation).
     let edgeTopologyChanged = false;
+
+    // Reconcile sources whose link target was deleted this run and that were
+    // NOT re-parsed themselves (mtime unchanged → skipped above): re-insert
+    // their freshly-parsed edges, which now point at the `_stub/` IDs the
+    // stub-creation pass below materializes. Runs before the resolved-stub
+    // pass, so a source fixed here can no longer appear in that pass's
+    // getEdgesTo() lookups (its stale edges are already replaced).
+    for (const sourceId of deletedLinkSources) {
+      if (justIndexed.has(sourceId) || !currentPaths.has(sourceId)) continue;
+      this.store.deleteAllEdgesFrom(sourceId);
+      for (const edge of edgesBySource.get(sourceId) ?? []) {
+        this.store.insertEdge(edge);
+        stats.edgesIndexed++;
+      }
+      edgeTopologyChanged = true;
+    }
 
     if (resolvedStubIds.length > 0) {
       const sourcesToReconcile = new Set<string>();

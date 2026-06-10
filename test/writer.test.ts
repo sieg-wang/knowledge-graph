@@ -287,7 +287,7 @@ describe('VaultWriter', () => {
       expect(store.getNode('_stub/Unknown Target.md')).toBeDefined();
     });
 
-    it('preserves .md extension when constructing stub ID for unknown targets', async () => {
+    it('appends .md to stub IDs even when the target already ends in .md (parser parity)', async () => {
       await writer.createNode({
         title: 'Source',
         frontmatter: {},
@@ -296,9 +296,15 @@ describe('VaultWriter', () => {
 
       await writer.addLink('Source.md', 'Unknown.md', 'Link context.');
 
+      // parser.ts emits `_stub/${link.raw}.md` UNCONDITIONALLY, so the
+      // literal `[[Unknown.md]]` this call appended re-parses to
+      // `_stub/Unknown.md.md`. The writer must mint the SAME ID: its old
+      // `_stub/Unknown.md` diverged, so the next IndexPipeline run
+      // misclassified it as a resolved stub, deleted it, and re-created the
+      // parser-shaped stub — phantom stub churn on every full index.
       const edges = store.getEdgesFrom('Source.md');
-      expect(edges.some(e => e.targetId === '_stub/Unknown.md')).toBe(true);
-      expect(store.getNode('_stub/Unknown.md')).toBeDefined();
+      expect(edges.some(e => e.targetId === '_stub/Unknown.md.md')).toBe(true);
+      expect(store.getNode('_stub/Unknown.md.md')).toBeDefined();
     });
 
     it('does NOT use _stub/ prefix when target resolves to an existing node', async () => {
@@ -457,6 +463,22 @@ describe('VaultWriter', () => {
       expect(Object.prototype.hasOwnProperty.call(fm, 'prototype')).toBe(false);
       expect(fm.legit).toBe('keep_me');
     });
+
+    // Same failure class as the parser-side title guard: a non-string
+    // `title:` (array/number) previously flowed into Store.upsertNode where
+    // better-sqlite3 cannot bind it — annotateNode/addLink on such a file
+    // threw and the whole writer call died. Must fall back to the filename.
+    it('falls back to filename when frontmatter title is not a string', async () => {
+      const arrPath = join(tempVault, 'ArrayTitle.md');
+      const { writeFileSync: wfs } = require('fs') as typeof import('fs');
+      wfs(arrPath, '---\ntitle:\n  - part1\n  - part2\n---\nBody.\n', 'utf-8');
+
+      await writer.annotateNode('ArrayTitle.md', '\nappended.\n');
+
+      const node = store.getNode('ArrayTitle.md');
+      expect(node).toBeDefined();
+      expect(node!.title).toBe('ArrayTitle');
+    });
   });
 
   // ── Finding 3: nodes created/annotated via the writer must be embedded so
@@ -490,19 +512,35 @@ describe('VaultWriter', () => {
       expect(results.some(r => r.nodeId === 'Concepts/Quantum Entanglement.md')).toBe(true);
     });
 
-    it('annotateNode refreshes the embedding so appended content is searchable', async () => {
+    // The embedding contract is title + tags + FIRST paragraph only
+    // (Embedder.buildEmbeddingText) — content appended BEHIND an existing
+    // first paragraph does NOT change the vector. The previous form of this
+    // test ("appended content is searchable") was vacuous: with a 2-3 node
+    // embedded corpus and k=20 KNN, every embedded node is always returned,
+    // so it passed even if annotateNode skipped re-embedding entirely.
+    // Instead: start from an EMPTY body (so the annotation becomes the first
+    // paragraph) and assert the STORED vector actually changed.
+    it('annotateNode recomputes the stored embedding from the updated file', async () => {
       const w = new VaultWriter(tempVault, store, embedder);
       await w.createNode({
         title: 'Sparse Note',
         frontmatter: {},
-        content: 'Placeholder.',
+        content: '',
       });
 
-      await w.annotateNode('Sparse Note.md', '\n\nPhotosynthesis converts sunlight into chemical energy in chloroplasts.');
+      const rowid = store.getNode('Sparse Note.md')!.rowid;
+      const readVec = () => store.db.prepare(
+        'SELECT embedding FROM nodes_vec WHERE rowid = ?'
+      ).get(BigInt(rowid)) as { embedding: Buffer };
 
-      const search = new Search(store, embedder);
-      const results = await search.semantic('photosynthesis sunlight chloroplasts chemical energy');
-      expect(results.some(r => r.nodeId === 'Sparse Note.md')).toBe(true);
+      const before = Buffer.from(readVec().embedding);
+      await w.annotateNode(
+        'Sparse Note.md',
+        'Photosynthesis converts sunlight into chemical energy in chloroplasts.',
+      );
+      const after = Buffer.from(readVec().embedding);
+
+      expect(after.equals(before)).toBe(false);
     });
 
     it('without an embedder, createNode still writes the node but skips embedding (back-compat)', async () => {

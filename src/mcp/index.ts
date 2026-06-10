@@ -122,7 +122,7 @@ server.tool(
   async ({ query, fulltext, limit }) => {
     let results;
     if (fulltext) {
-      results = store.searchFullText(query).slice(0, limit ?? 20);
+      results = store.searchFullText(query, limit ?? 20);
     } else {
       await ensureEmbedder();
       results = await search.semantic(query, limit ?? 20);
@@ -234,7 +234,11 @@ server.tool(
       }
       const communities = store.getAllCommunities();
       const c = communities.find(c => c.id === parseInt(community, 10));
-      communityNodeIds = c?.nodeIds;
+      // A valid-format but nonexistent ID (e.g. stale after re-indexing
+      // renumbered communities) must error like kg_community does — running
+      // unfiltered returns the GLOBAL ranking, a plausible but wrong answer.
+      if (!c) throw new Error(`Community "${community}" not found`);
+      communityNodeIds = c.nodeIds;
     }
     const central = kg.centralNodes(limit ?? 20, communityNodeIds);
     return { content: [{ type: 'text', text: JSON.stringify(central, null, 2) }] };

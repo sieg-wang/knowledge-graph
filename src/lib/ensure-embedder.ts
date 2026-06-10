@@ -23,5 +23,14 @@ export interface EmbedderLike {
 
 export function makeEnsureEmbedder(embedder: EmbedderLike): () => Promise<void> {
   let initPromise: Promise<void> | null = null;
-  return () => (initPromise ??= embedder.init());
+  return () => (initPromise ??= embedder.init().catch(err => {
+    // A REJECTED promise must NOT stay cached: one transient init failure
+    // (first-run model download with network down, disk full in the HF
+    // cache) would otherwise rethrow on every later call for the whole
+    // long-lived MCP server session. Clear the gate so the next call
+    // retries; concurrent callers of THIS attempt still share the single
+    // rejection.
+    initPromise = null;
+    throw err;
+  }));
 }

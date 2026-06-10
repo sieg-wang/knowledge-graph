@@ -8,3 +8,6 @@ docs/superpowers/
 
 # Coverage
 coverage/
+
+# Claude Code local (per-user) settings — holds permissive overrides
+.claude/settings.local.json

@@ -40,4 +40,62 @@ describe('ensureEmbedder (concurrency-safe init gate)', () => {
     expect(a).toBe(b);
     await Promise.all([a, b]);
   });
+
+  // Regression: a REJECTED init() promise stayed cached in the gate, so one
+  // transient failure (first-run model download with network down, disk full
+  // in the HF cache) rethrew the original error on EVERY later call — the
+  // MCP server is long-lived, so kg_index/kg_search stayed dead for the whole
+  // session even after the cause was fixed. A failed init must clear the
+  // gate so the next call retries.
+  it('retries init after a failed init instead of caching the rejection', async () => {
+    let initCount = 0;
+    const embedder = {
+      init: () => {
+        initCount++;
+        return initCount === 1
+          ? Promise.reject(new Error('model download failed'))
+          : Promise.resolve();
+      },
+    };
+
+    const ensure = makeEnsureEmbedder(embedder);
+
+    await expect(ensure()).rejects.toThrow('model download failed');
+    expect(initCount).toBe(1);
+
+    // The cause is fixed (second init succeeds) — the gate must retry...
+    await expect(ensure()).resolves.toBeUndefined();
+    expect(initCount).toBe(2);
+
+    // ...and the SUCCESS stays cached as before (no third init).
+    await ensure();
+    expect(initCount).toBe(2);
+  });
+
+  it('rejects all concurrent callers of a failing init, then allows retry', async () => {
+    let initCount = 0;
+    let rejectInit!: (e: Error) => void;
+    const failing = new Promise<void>((_, rej) => { rejectInit = rej; });
+    const embedder = {
+      init: () => {
+        initCount++;
+        return initCount === 1 ? failing : Promise.resolve();
+      },
+    };
+    const ensure = makeEnsureEmbedder(embedder);
+
+    // Two callers race onto the SAME failing attempt — both must see the
+    // rejection (one shared init, not two), and the failure must not poison
+    // the gate for the retry afterwards.
+    const p1 = ensure();
+    const p2 = ensure();
+    expect(initCount).toBe(1);
+
+    rejectInit(new Error('boom'));
+    await expect(p1).rejects.toThrow('boom');
+    await expect(p2).rejects.toThrow('boom');
+
+    await expect(ensure()).resolves.toBeUndefined();
+    expect(initCount).toBe(2);
+  });
 });

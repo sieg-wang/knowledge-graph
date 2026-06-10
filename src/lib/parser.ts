@@ -46,8 +46,15 @@ export async function parseVault(vaultPath: string): Promise<ParseResult> {
       content = raw;
     }
 
-    const title = (fm.title as string)
-      ?? basename(relPath, '.md');
+    // `title:` is user-authored YAML — an array/number/blank value must fall
+    // back to the filename. The previous unguarded cast let a non-string
+    // reach Store.upsertNode, where better-sqlite3 cannot bind it: one
+    // malformed note aborted the ENTIRE index run mid-way. Same failure
+    // class as the scalar-tags (graph.ts) and scalar-aliases (resolve.ts)
+    // guards.
+    const title = typeof fm.title === 'string' && fm.title.trim()
+      ? fm.title
+      : basename(relPath, '.md');
 
     const inlineTags = extractInlineTags(content);
     const frontmatter = { ...fm };

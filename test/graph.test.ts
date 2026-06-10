@@ -124,6 +124,18 @@ describe('KnowledgeGraph', () => {
     expect(common).toHaveLength(0);
   });
 
+  // subgraph lacked the hasNode guard every sibling traversal (neighbors,
+  // findPaths, commonNeighbors) has. Reachable in the MCP server: requireMatch
+  // resolves against the LIVE sqlite store while kg_subgraph walks the CACHED
+  // graph — a node added by an external `kg index` run resolved in the store
+  // but was absent from cachedGraph, turning the tool call into an opaque
+  // graphology NotFoundGraphError instead of an empty subgraph.
+  it('subgraph returns empty result for nonexistent node', () => {
+    const sub = kg.subgraph('nonexistent.md', 1);
+    expect(sub.nodes).toHaveLength(0);
+    expect(sub.edges).toHaveLength(0);
+  });
+
   it('subgraph of isolated node contains only itself', () => {
     const sub = kg.subgraph('d.md', 1);
     expect(sub.nodes).toHaveLength(1);

@@ -194,7 +194,9 @@ export class Store {
     this.db.prepare('DELETE FROM edges WHERE source_id = ?').run(nodeId);
   }
 
-  searchFullText(query: string): SearchResult[] {
+  // `limit` mirrors searchVector's signature — a hardcoded LIMIT 20 silently
+  // capped caller-supplied limits above 20 (callers slice AFTER this call).
+  searchFullText(query: string, limit = 20): SearchResult[] {
     const runFts = (q: string) =>
       this.db.prepare(`
         SELECT n.id, n.title, rank,
@@ -203,8 +205,8 @@ export class Store {
         JOIN nodes n ON n.rowid = f.rowid
         WHERE nodes_fts MATCH ?
         ORDER BY rank
-        LIMIT 20
-      `).all(q).map((r: any) => ({
+        LIMIT ?
+      `).all(q, limit).map((r: any) => ({
         nodeId: r.id,
         title: r.title,
         score: -r.rank as number,

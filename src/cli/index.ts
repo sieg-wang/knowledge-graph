@@ -60,7 +60,15 @@ program
     const embedder = new Embedder();
     await embedder.init();
     const pipeline = new IndexPipeline(store, embedder);
-    const stats = await pipeline.index(config.vaultPath, parseFloat(opts.resolution));
+    // Bare parseFloat let `--resolution abc` feed NaN into Louvain — garbage
+    // communities with no diagnostic (cf. numeric.ts rationale; the MCP side
+    // validates the same field with z.number().positive()).
+    const resolution = Number(opts.resolution);
+    if (!Number.isFinite(resolution) || resolution <= 0) {
+      console.error(`--resolution: must be a positive number (got ${JSON.stringify(opts.resolution)})`);
+      process.exit(1);
+    }
+    const stats = await pipeline.index(config.vaultPath, resolution);
     output(stats);
     await embedder.dispose();
     store.close();
@@ -123,7 +131,7 @@ program
   .action(async (query, opts) => {
     const store = getStore();
     if (opts.fulltext) {
-      const results = store.searchFullText(query).slice(0, parsePositiveInt(opts.limit, '--limit'));
+      const results = store.searchFullText(query, parsePositiveInt(opts.limit, '--limit'));
       output(results);
     } else {
       const embedder = new Embedder();
@@ -232,7 +240,13 @@ program
       const communityId = parsePositiveInt(opts.community, '--community', { allowZero: true });
       const communities = store.getAllCommunities();
       const c = communities.find(c => c.id === communityId);
-      communityNodeIds = c?.nodeIds;
+      // Nonexistent ID must error like the `community` command — running
+      // unfiltered silently returns the GLOBAL ranking instead.
+      if (!c) {
+        console.error(`Community "${opts.community}" not found`);
+        process.exit(1);
+      }
+      communityNodeIds = c.nodeIds;
     }
     const central = kg.centralNodes(parsePositiveInt(opts.limit, '--limit'), communityNodeIds);
     output(central);

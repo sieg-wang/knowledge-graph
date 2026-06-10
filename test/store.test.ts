@@ -75,6 +75,25 @@ describe('Store', () => {
     expect(results[0].nodeId).toBe('test.md');
   });
 
+  // Regression: searchFullText hardcoded `LIMIT 20` while both callers
+  // (kg_search MCP tool, `kg search --fulltext`) accept a larger limit and
+  // slice AFTER the call — passing limit=50 silently returned at most 20
+  // with no truncation hint, while the semantic path (searchVector) honored
+  // limits above 20. The two search modes must share the same limit contract.
+  it('searchFullText honors a caller-supplied limit above the default 20', () => {
+    for (let i = 0; i < 25; i++) {
+      store.upsertNode({
+        id: `note${i}.md`,
+        title: `Note ${i}`,
+        content: 'zebra paragraph content',
+        frontmatter: {},
+      });
+    }
+    expect(store.searchFullText('zebra')).toHaveLength(20); // default unchanged
+    expect(store.searchFullText('zebra', 25)).toHaveLength(25);
+    expect(store.searchFullText('zebra', 5)).toHaveLength(5);
+  });
+
   it('tracks sync state', () => {
     store.upsertSync('test.md', 1000);
     expect(store.getSyncMtime('test.md')).toBe(1000);
