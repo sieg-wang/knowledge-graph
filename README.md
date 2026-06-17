@@ -114,6 +114,28 @@ No LLM inside the tool — the agent does the reasoning, the tool provides the d
 - **PageRank** may fail to converge on large graphs with many disconnected components. Falls back to degree centrality automatically.
 - **Wiki link resolution** uses Obsidian's "shortest unique path" algorithm. Ambiguous links (same filename in multiple directories) resolve to the first match with a warning.
 
+## Accepted advisories
+
+`npm audit` reports 2 moderate advisories (`gray-matter` → `js-yaml`,
+[GHSA-h67p-54hq-rp68](https://github.com/advisories/GHSA-h67p-54hq-rp68) —
+quadratic-complexity DoS in YAML merge-key handling). **Accepted, not fixed**
+(reviewed 2026-06-17):
+
+- **Not reachable in this tool's threat model.** The frontmatter parser only
+  runs over the user's own Obsidian vault in a local batch build — there is no
+  network service and no untrusted YAML input. A merge-key DoS would, at worst,
+  hang a local build the user controls.
+- **No clean fix exists.** `gray-matter@4.0.3` is already the latest release and
+  pins `js-yaml@^3` via `safeLoad`/`safeDump`, both removed in `js-yaml@4`, so an
+  `overrides` bump to the patched `js-yaml@4.2.0` makes gray-matter crash on
+  load. `npm audit fix` only offers a downgrade to the ancient `gray-matter@2.0.1`
+  (a regression), and swapping to a `yaml`-package parser changes YAML 1.1→1.2
+  semantics (`yes/no`, octal scalars) and would re-parse existing notes
+  differently. None of these is worth it for a non-reachable moderate.
+
+If a `gray-matter` release pinning `js-yaml@>=4.2.0` ships, drop this note and
+upgrade.
+
 ## License
 
 MIT
