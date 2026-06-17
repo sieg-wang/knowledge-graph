@@ -14,6 +14,9 @@ export class Search {
   }
 
   fulltext(query: string, limit = 20): SearchResult[] {
-    return this.store.searchFullText(query).slice(0, limit);
+    // Forward the limit: searchFullText applies LIMIT in SQL (default 20), so
+    // calling it without `limit` capped results at 20 and the .slice(0, limit)
+    // was a no-op for any limit > 20. Other callers (mcp, cli) forward it.
+    return this.store.searchFullText(query, limit);
   }
 }

@@ -47,4 +47,15 @@ describe('Search', () => {
     expect(results.length).toBeGreaterThan(0);
     expect(results[0].nodeId).toBe('cake.md');
   });
+
+  it('fulltext forwards a limit greater than the default 20', () => {
+    // Regression: fulltext() called searchFullText WITHOUT the limit, so SQL
+    // LIMIT 20 capped results and the trailing .slice(0, limit) was a no-op —
+    // any limit > 20 silently returned only 20 rows.
+    for (let i = 0; i < 30; i++) {
+      store.upsertNode({ id: `widget-${i}.md`, title: `Widget ${i}`, content: 'reusable widget component', frontmatter: {} });
+    }
+    expect(search.fulltext('widget', 20).length).toBe(20);
+    expect(search.fulltext('widget', 25).length).toBeGreaterThan(20);
+  });
 });
