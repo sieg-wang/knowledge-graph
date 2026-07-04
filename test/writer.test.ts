@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
-import { mkdtempSync, readFileSync, existsSync, readdirSync } from 'fs';
+import { mkdtempSync, readFileSync, existsSync, readdirSync, writeFileSync, symlinkSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { cpSync } from 'fs';
@@ -214,6 +214,42 @@ describe('VaultWriter', () => {
     it('throws if the node does not exist', async () => {
       await expect(writer.annotateNode('nonexistent.md', 'stuff')).rejects.toThrow(/not found/);
     });
+
+    // Regression (MAJOR-2): a vault file containing [[../../etc/secrets]] generates
+    // stub ID `_stub/../../etc/secrets.md`. Without the confinement guard,
+    // annotateNode resolves the `..` segments and appends outside the vault root.
+    it('rejects a node ID that escapes the vault via path traversal', async () => {
+      // The path does not need to exist — the guard fires before existsSync.
+      await expect(
+        writer.annotateNode('../../escape.md', 'x'),
+      ).rejects.toThrow(/escapes vault/);
+    });
+
+    it('rejects a stub node ID that resolves outside the vault via ..', async () => {
+      await expect(
+        writer.annotateNode('_stub/../../outside.md', 'x'),
+      ).rejects.toThrow(/escapes vault/);
+    });
+
+    // Regression (symlink escape): a symlink planted INSIDE the vault pointing
+    // to a path outside the vault bypasses the old lexical path.resolve() guard
+    // because resolve() returns the symlink's own path (still lexically inside
+    // the vault).  The realpath-based guard follows the symlink and sees the
+    // real target is outside the vault.
+    //
+    // NOTE: this test FAILS against the old lexical-only code (resolve() keeps
+    // the path appearing inside the vault) and PASSES after the realpathSync fix.
+    it('rejects a node ID that resolves through an in-vault symlink to outside the vault', async () => {
+      // Plant a symlink at vault/escape → /tmp (guaranteed to exist on POSIX).
+      const symlinkInVault = join(tempVault, 'escape');
+      symlinkSync('/tmp', symlinkInVault);
+
+      // nodeId 'escape' → absPath = vault/escape → realpathSync follows the
+      // symlink → /private/tmp (or /tmp) which is outside the vault.
+      await expect(
+        writer.annotateNode('escape', 'x'),
+      ).rejects.toThrow(/escapes vault/);
+    });
   });
 
   describe('addLink', () => {
@@ -348,6 +384,27 @@ describe('VaultWriter', () => {
       await expect(writer.addLink('nonexistent.md', 'target', 'context')).rejects.toThrow(/not found/);
     });
 
+    // Regression (MAJOR-2): a source ID like `../../escape.md` must be rejected
+    // before existsSync, preventing reads/writes outside the vault.
+    it('rejects a source ID that escapes the vault via path traversal', async () => {
+      await expect(
+        writer.addLink('../../escape.md', 'Target', 'context'),
+      ).rejects.toThrow(/escapes vault/);
+    });
+
+    // MINOR-2: calling addLink twice with the same unresolvable target must
+    // materialize exactly one stub node (idempotent — not two stubs).
+    it('does not duplicate stub node when addLink is called twice for the same unknown target', async () => {
+      await writer.createNode({ title: 'Source', frontmatter: {}, content: 'x' });
+      await writer.addLink('Source.md', 'Unknown', 'first context');
+      await writer.addLink('Source.md', 'Unknown', 'second context');
+
+      const stub = store.getNode('_stub/Unknown.md');
+      expect(stub).toBeDefined();
+      // Exactly one stub node with that ID.
+      expect(store.allNodeIds().filter(id => id === '_stub/Unknown.md')).toHaveLength(1);
+    });
+
     // ── Codex review #11: wiki-link injection via unescaped target/context ──
 
     it('rejects target containing `]]` (would break out of wiki-link)', async () => {
@@ -445,8 +502,7 @@ describe('VaultWriter', () => {
       // createNode's own input validation. annotateNode → indexFile is the
       // path that previously skipped sanitization.
       const evilPath = join(tempVault, 'Evil.md');
-      const { writeFileSync: wfs } = require('fs') as typeof import('fs');
-      wfs(
+      writeFileSync(
         evilPath,
         '---\n__proto__:\n  polluted: true\nconstructor:\n  evil: 1\nprototype:\n  x: y\nlegit: keep_me\n---\n# evil\n',
         'utf-8',
@@ -470,8 +526,7 @@ describe('VaultWriter', () => {
     // threw and the whole writer call died. Must fall back to the filename.
     it('falls back to filename when frontmatter title is not a string', async () => {
       const arrPath = join(tempVault, 'ArrayTitle.md');
-      const { writeFileSync: wfs } = require('fs') as typeof import('fs');
-      wfs(arrPath, '---\ntitle:\n  - part1\n  - part2\n---\nBody.\n', 'utf-8');
+      writeFileSync(arrPath, '---\ntitle:\n  - part1\n  - part2\n---\nBody.\n', 'utf-8');
 
       await writer.annotateNode('ArrayTitle.md', '\nappended.\n');
 

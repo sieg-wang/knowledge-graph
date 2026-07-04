@@ -170,6 +170,28 @@ describe('resolveNodeName', () => {
     expect(matches.every(m => m.matchType === 'substring')).toBe(true);
   });
 
+  // MAJOR-1: resolveNodeName must not degrade to O(N) on large vaults.
+  // With 2000 nodes, an exact-title lookup should hit the idx_nodes_title
+  // index and return in well under 50ms (was: O(N) full-table-scan + N JSON.parse).
+  it('resolveNodeName with 2000 nodes returns an exact-title match in <50ms', () => {
+    const bigStore = new Store(':memory:');
+    for (let i = 0; i < 2000; i++) {
+      bigStore.upsertNode({
+        id: `bulk${i}.md`,
+        title: `Bulk Node ${i}`,
+        content: '',
+        frontmatter: { aliases: [`alias-${i}`] },
+      });
+    }
+    const start = Date.now();
+    const matches = resolveNodeName('Bulk Node 999', bigStore);
+    const elapsed = Date.now() - start;
+    expect(matches).toHaveLength(1);
+    expect(matches[0].matchType).toBe('exact');
+    expect(elapsed).toBeLessThan(50);
+    bigStore.close();
+  });
+
   // Regression: Obsidian permits a SCALAR `aliases:` (e.g. `aliases: MyAlias`),
   // which gray-matter parses to a bare string, not an array. The alias-match
   // loop did `(fm.aliases as string[]).some(...)` — a lie that threw

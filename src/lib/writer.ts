@@ -6,8 +6,9 @@ import {
   appendFileSync,
   renameSync,
   unlinkSync,
+  realpathSync,
 } from 'fs';
-import { join, basename } from 'path';
+import { join, basename, dirname, resolve } from 'path';
 import matter from 'gray-matter';
 import type { Store } from './store.js';
 import { Embedder } from './embedder.js';
@@ -69,9 +70,38 @@ function assertSafeDirectory(directory: string | undefined): void {
     if (seg === '' || seg === '.' || seg === '..') {
       throw new Error(`Unsafe directory: ${JSON.stringify(directory)} — contains empty or parent segment`);
     }
-    if (INVALID_TITLE_CHARS.test(seg.replace('/', ''))) {
+    if (INVALID_TITLE_CHARS.test(seg)) {
       throw new Error(`Unsafe directory segment: ${JSON.stringify(seg)}`);
     }
+  }
+}
+
+/**
+ * Throws if `absPath` is not strictly inside `vaultPath`. Prevents path
+ * traversal via node IDs like `_stub/../../etc/secrets.md` — an untrusted
+ * vault file can embed such links, which the parser emits verbatim as stub IDs.
+ * Without this guard, `annotateNode` / `addLink` / `indexFile` would resolve the
+ * `..` segments and write/read outside the vault root.
+ */
+function assertPathInVault(absPath: string, vaultPath: string, nodeId: string): void {
+  // Canonicalize vault root — it could itself be a symlink.
+  const realVault = realpathSync(vaultPath);
+
+  // Resolve symlinks in absPath.  The file may not exist yet (annotateNode /
+  // addLink guard fires before existsSync), so fall back to realpathSync on
+  // the containing directory and re-attach the basename.  This still follows
+  // any symlinks in ancestor dirs and eliminates all `..` segments, so both
+  // the dotdot-traversal and symlink-escape threat classes are caught.
+  let realPath: string;
+  try {
+    realPath = realpathSync(absPath);
+  } catch {
+    const realDir = realpathSync(dirname(absPath));
+    realPath = join(realDir, basename(absPath));
+  }
+
+  if (!realPath.startsWith(realVault + '/') && realPath !== realVault) {
+    throw new Error(`Node ID escapes vault: ${nodeId}`);
   }
 }
 
@@ -130,6 +160,7 @@ export class VaultWriter {
 
   async annotateNode(nodeId: string, content: string): Promise<void> {
     const absPath = join(this.vaultPath, nodeId);
+    assertPathInVault(absPath, this.vaultPath, nodeId);
     if (!existsSync(absPath)) {
       throw new Error(`Node not found: ${nodeId}`);
     }
@@ -142,6 +173,7 @@ export class VaultWriter {
 
   async addLink(sourceId: string, targetRef: string, context: string): Promise<void> {
     const absPath = join(this.vaultPath, sourceId);
+    assertPathInVault(absPath, this.vaultPath, sourceId);
     if (!existsSync(absPath)) {
       throw new Error(`Source node not found: ${sourceId}`);
     }
@@ -208,6 +240,7 @@ export class VaultWriter {
 
   private async indexFile(relPath: string): Promise<void> {
     const absPath = join(this.vaultPath, relPath);
+    assertPathInVault(absPath, this.vaultPath, relPath);
     const raw = readFileSync(absPath, 'utf-8');
 
     let fm: Record<string, unknown>;

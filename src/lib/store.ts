@@ -30,6 +30,8 @@ export class Store {
 
       CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_id);
       CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_id);
+      CREATE INDEX IF NOT EXISTS idx_nodes_title ON nodes(title);
+      CREATE INDEX IF NOT EXISTS idx_nodes_title_lower ON nodes(LOWER(title));
 
       CREATE TABLE IF NOT EXISTS communities (
         id INTEGER PRIMARY KEY,
@@ -101,6 +103,22 @@ export class Store {
 
   allNodeIds(): string[] {
     return this.db.prepare('SELECT id FROM nodes').all().map((r: any) => r.id);
+  }
+
+  /** All nodes with frontmatter string for alias scanning. One query. */
+  getAllNodes(): Array<{ id: string; title: string; frontmatter: string }> {
+    return this.db.prepare('SELECT id, title, frontmatter FROM nodes').all() as Array<{
+      id: string; title: string; frontmatter: string;
+    }>;
+  }
+
+  /** All edges. One query — used for batch graph loading in KnowledgeGraph.fromStore. */
+  getAllEdges(): Array<{ sourceId: string; targetId: string; context: string }> {
+    return this.db.prepare('SELECT source_id, target_id, context FROM edges').all().map((r: any) => ({
+      sourceId: r.source_id,
+      targetId: r.target_id,
+      context: r.context,
+    }));
   }
 
   insertEdge(edge: ParsedEdge): void {
@@ -227,7 +245,10 @@ export class Store {
 
   upsertEmbedding(nodeId: string, embedding: Float32Array): void {
     const node = this.getNode(nodeId);
-    if (!node) return;
+    if (!node) {
+      console.warn(`upsertEmbedding: node ${nodeId} not found, skipping`);
+      return;
+    }
     // sqlite-vec requires BigInt rowids via better-sqlite3
     this.db.prepare('DELETE FROM nodes_vec WHERE rowid = ?').run(BigInt(node.rowid));
     this.db.prepare(

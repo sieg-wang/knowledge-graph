@@ -12,15 +12,17 @@ import { VaultWriter } from '../lib/writer.js';
 import { makeEnsureEmbedder } from '../lib/ensure-embedder.js';
 import { mkdirSync } from 'fs';
 
-const config = resolveConfig({});
-mkdirSync(config.dataDir, { recursive: true });
-
-const store = new Store(config.dbPath);
-const embedder = new Embedder();
-const search = new Search(store, embedder);
-const writer = new VaultWriter(config.vaultPath, store, embedder);
+// Config, store, and related singletons are initialized in main() so that a
+// missing KG_VAULT_PATH (or any other resolveConfig error) surfaces as a
+// clean stderr message rather than an unformatted stack trace on module load
+// before the MCP stdio transport is connected.
+let config: ReturnType<typeof resolveConfig>;
+let store: Store;
+let embedder: Embedder;
+let search: Search;
+let writer: VaultWriter;
 let cachedGraph: KnowledgeGraph | null = null;
-const ensureEmbedder = makeEnsureEmbedder(embedder);
+let ensureEmbedder: ReturnType<typeof makeEnsureEmbedder>;
 
 function getGraph(): KnowledgeGraph {
   if (!cachedGraph) {
@@ -301,6 +303,22 @@ server.tool(
 );
 
 async function main() {
+  // Resolve config inside main() so errors surface as clean messages rather
+  // than raw stack traces on module load before the stdio transport connects.
+  try {
+    config = resolveConfig({});
+    mkdirSync(config.dataDir, { recursive: true });
+  } catch (err) {
+    process.stderr.write(`knowledge-graph MCP: configuration error — ${(err as Error).message}\n`);
+    process.exit(1);
+  }
+
+  store = new Store(config.dbPath);
+  embedder = new Embedder();
+  search = new Search(store, embedder);
+  writer = new VaultWriter(config.vaultPath, store, embedder);
+  ensureEmbedder = makeEnsureEmbedder(embedder);
+
   // Embedder is lazily initialized on first semantic search/index — no eager loading here
   const transport = new StdioServerTransport();
   await server.connect(transport);

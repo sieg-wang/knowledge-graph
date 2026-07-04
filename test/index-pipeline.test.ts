@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { join } from 'path';
 import { mkdtempSync, writeFileSync, rmSync, utimesSync } from 'fs';
 import { tmpdir } from 'os';

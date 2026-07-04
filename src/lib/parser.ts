@@ -75,14 +75,20 @@ export async function parseVault(vaultPath: string): Promise<ParseResult> {
         stubIds.add(resolvedTarget);
       }
 
-      const context = paragraphs.find(p => p.includes(`[[${link.raw}`))
+      const contextRaw = paragraphs.find(p => p.includes(`[[${link.raw}`))
         ?? paragraphs.find(p => p.includes(link.display ?? link.raw))
         ?? '';
+      // Cap context at 500 chars. Without this, a note with no blank lines
+      // stores the entire file content as edge context for every outgoing link
+      // (a 100 KB note with 10 links writes 1 MB of context to the DB).
+      // The CLI and MCP already truncate to 200 chars for display; the DB
+      // should not need the full paragraph.
+      const context = contextRaw.trim().slice(0, 500);
 
       edges.push({
         sourceId: relPath,
         targetId: resolvedTarget,
-        context: context.trim(),
+        context,
       });
     }
   }

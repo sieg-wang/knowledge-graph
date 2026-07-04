@@ -64,7 +64,17 @@ export class IndexPipeline {
 
     // Index nodes (incremental)
     for (const node of nodes) {
-      const fileStat = await stat(join(vaultPath, node.id));
+      // Guard against ENOENT: a file deleted between parseVault() and the stat
+      // loop (by a sync client, concurrent process, or user) must not abort the
+      // entire index run. Skip the missing file and increment nodesSkipped so
+      // callers can observe the gap; re-throw all other OS errors.
+      let fileStat: Awaited<ReturnType<typeof stat>>;
+      try {
+        fileStat = await stat(join(vaultPath, node.id));
+      } catch (e: any) {
+        if (e.code === 'ENOENT') { stats.nodesSkipped++; continue; }
+        throw e;
+      }
       const mtime = fileStat.mtimeMs;
       const prevMtime = this.store.getSyncMtime(node.id);
 

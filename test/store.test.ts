@@ -261,4 +261,47 @@ describe('Store', () => {
     // re-open a fresh store so afterEach can still close cleanly
     store = new Store(':memory:');
   });
+
+  // --- Store coverage gaps (weakest-covered core module) ---
+
+  // L168 arm1: deleteNode called on a non-existent ID must be a no-op.
+  it('deleteNode on a non-existent ID does not throw', () => {
+    expect(() => store.deleteNode('never-existed.md')).not.toThrow();
+  });
+
+  // L228: upsertEmbedding when node does not exist must be a no-op (MINOR-3).
+  it('upsertEmbedding on a non-existent node is a no-op without throwing', () => {
+    const embedding = new Float32Array(384).fill(0.1);
+    expect(() => store.upsertEmbedding('never-indexed.md', embedding)).not.toThrow();
+  });
+
+  // L301 arm0: searchVector on a completely empty embedding table returns [].
+  it('searchVector on an empty embedding table returns an empty array', () => {
+    store.upsertNode({ id: 'no-vec.md', title: 'No Vec', content: 'test', frontmatter: {} });
+    // Node exists in nodes table but has no embedding in nodes_vec.
+    const results = store.searchVector(new Float32Array(384).fill(0.1));
+    expect(results).toEqual([]);
+  });
+
+  // Verify the new batch-access methods added for graph.ts and resolve.ts.
+  it('getAllNodes returns all nodes with id, title, and frontmatter string', () => {
+    store.upsertNode({ id: 'a.md', title: 'Alpha', content: '', frontmatter: { x: 1 } });
+    store.upsertNode({ id: 'b.md', title: 'Beta', content: '', frontmatter: {} });
+    const all = store.getAllNodes();
+    expect(all.length).toBeGreaterThanOrEqual(2);
+    const alpha = all.find(n => n.id === 'a.md');
+    expect(alpha).toBeDefined();
+    expect(alpha!.title).toBe('Alpha');
+    expect(JSON.parse(alpha!.frontmatter)).toEqual({ x: 1 });
+  });
+
+  it('getAllEdges returns all edges as {sourceId, targetId, context}', () => {
+    store.upsertNode({ id: 'x.md', title: 'X', content: '', frontmatter: {} });
+    store.upsertNode({ id: 'y.md', title: 'Y', content: '', frontmatter: {} });
+    store.insertEdge({ sourceId: 'x.md', targetId: 'y.md', context: 'ctx' });
+    const edges = store.getAllEdges();
+    const e = edges.find(e => e.sourceId === 'x.md' && e.targetId === 'y.md');
+    expect(e).toBeDefined();
+    expect(e!.context).toBe('ctx');
+  });
 });

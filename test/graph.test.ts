@@ -160,6 +160,41 @@ describe('KnowledgeGraph', () => {
     isolatedStore.close();
   });
 
+  // MINOR-6: safeRank's `connected.order === 0` early-return (graph.ts:30) fires
+  // when every node has degree 0. centralNodes must still succeed and return all
+  // zeros (no crash, no empty-array surprise).
+  it('centralNodes returns all-zero scores on a fully isolated graph', () => {
+    const isolatedStore = new Store(':memory:');
+    isolatedStore.upsertNode({ id: 'x.md', title: 'X', content: '', frontmatter: {} });
+    isolatedStore.upsertNode({ id: 'y.md', title: 'Y', content: '', frontmatter: {} });
+    const isolatedKg = KnowledgeGraph.fromStore(isolatedStore);
+    const central = isolatedKg.centralNodes(10);
+    // All nodes have degree 0, so all scores must be 0 (PageRank skipped).
+    expect(central.every(n => n.score === 0)).toBe(true);
+    isolatedStore.close();
+  });
+
+  // MAJOR-3: fromStore must use batch queries (2 total) and complete well within
+  // a reasonable wall-clock budget even for a large vault.
+  it('fromStore completes in <200ms with 500 nodes and 1000 edges', () => {
+    const bigStore = new Store(':memory:');
+    for (let i = 0; i < 500; i++) {
+      bigStore.upsertNode({ id: `n${i}.md`, title: `Node ${i}`, content: '', frontmatter: {} });
+    }
+    for (let i = 0; i < 1000; i++) {
+      bigStore.insertEdge({
+        sourceId: `n${i % 500}.md`,
+        targetId: `n${(i + 1) % 500}.md`,
+        context: `edge ${i}`,
+      });
+    }
+    const start = Date.now();
+    KnowledgeGraph.fromStore(bigStore);
+    const elapsed = Date.now() - start;
+    expect(elapsed).toBeLessThan(200);
+    bigStore.close();
+  });
+
   // Regression: a note with non-array `tags:` frontmatter (e.g. `tags: 42`)
   // survives the store round-trip as a scalar. detectCommunities did
   // `for (const tag of (node.frontmatter.tags as string[]))`, which throws

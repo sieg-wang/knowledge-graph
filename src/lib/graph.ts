@@ -55,17 +55,21 @@ export class KnowledgeGraph {
 
   static fromStore(store: Store): KnowledgeGraph {
     const graph = new Graph({ multi: true, type: 'directed' });
-    for (const id of store.allNodeIds()) {
-      const node = store.getNode(id);
-      if (node) graph.addNode(id, { title: node.title });
+
+    // Batch-load all nodes in one query (previously: allNodeIds() + getNode() × N = N+1 queries).
+    for (const row of store.getAllNodes()) {
+      let fm: Record<string, unknown>;
+      try { fm = JSON.parse(row.frontmatter); } catch { fm = {}; }
+      graph.addNode(row.id, { title: row.title, frontmatter: fm });
     }
-    for (const nodeId of store.allNodeIds()) {
-      for (const edge of store.getEdgesFrom(nodeId)) {
-        if (graph.hasNode(edge.targetId)) {
-          graph.addEdge(edge.sourceId, edge.targetId, { context: edge.context });
-        }
+
+    // Batch-load all edges in one query (previously: allNodeIds() + getEdgesFrom() × N = N+1 queries).
+    for (const edge of store.getAllEdges()) {
+      if (graph.hasNode(edge.sourceId) && graph.hasNode(edge.targetId)) {
+        graph.addEdge(edge.sourceId, edge.targetId, { context: edge.context });
       }
     }
+
     return new KnowledgeGraph(graph, store);
   }
 
@@ -96,17 +100,19 @@ export class KnowledgeGraph {
       for (const nid of neighborIds) {
         if (!visited.has(nid)) {
           visited.add(nid);
-          const edgesFromStore = [
-            ...this.store.getEdgesFrom(id).filter(e => e.targetId === nid),
-            ...this.store.getEdgesTo(id).filter(e => e.sourceId === nid),
+          // Read edge context from graph attrs (loaded in fromStore) — avoids
+          // store.getEdgesFrom/To queries inside the BFS loop.
+          const edgeKeys = [
+            ...this.graph.outEdges(id).filter(k => this.graph.target(k) === nid),
+            ...this.graph.inEdges(id).filter(k => this.graph.source(k) === nid),
           ];
           result.push({
             id: nid,
             title: this.graph.getNodeAttribute(nid, 'title'),
-            edges: edgesFromStore.map(e => ({
-              sourceId: e.sourceId,
-              targetId: e.targetId,
-              context: e.context,
+            edges: edgeKeys.map(k => ({
+              sourceId: this.graph.source(k),
+              targetId: this.graph.target(k),
+              context: this.graph.getEdgeAttribute(k, 'context') as string,
             })),
           });
           queue.push({ id: nid, d: d + 1 });
@@ -127,14 +133,17 @@ export class KnowledgeGraph {
       for (let i = 0; i < nodePath.length - 1; i++) {
         const src = nodePath[i];
         const tgt = nodePath[i + 1];
-        const edgeData = [
-          ...this.store.getEdgesFrom(src).filter(e => e.targetId === tgt),
-          ...this.store.getEdgesFrom(tgt).filter(e => e.targetId === src),
+        // Read context from graph edge attrs — avoids store queries in path rendering.
+        const edgeKeys = [
+          ...this.graph.outEdges(src).filter(k => this.graph.target(k) === tgt),
+          ...this.graph.outEdges(tgt).filter(k => this.graph.target(k) === src),
         ];
         edges.push({
           sourceId: src,
           targetId: tgt,
-          context: edgeData[0]?.context ?? '',
+          context: edgeKeys.length > 0
+            ? (this.graph.getEdgeAttribute(edgeKeys[0], 'context') as string)
+            : '',
         });
       }
       return { nodes: nodePath, edges, length: nodePath.length - 1 };
@@ -184,17 +193,19 @@ export class KnowledgeGraph {
     const nodes = [...visited].map(id => ({
       id,
       title: this.graph.getNodeAttribute(id, 'title'),
-      frontmatter: this.store.getNode(id)?.frontmatter ?? {},
+      frontmatter: (this.graph.getNodeAttribute(id, 'frontmatter') as Record<string, unknown>) ?? {},
     }));
 
     const edges: SubgraphResult['edges'] = [];
     for (const id of visited) {
-      for (const edge of this.store.getEdgesFrom(id)) {
-        if (visited.has(edge.targetId)) {
+      // Read edges from graph attrs — avoids store.getEdgesFrom() per BFS node.
+      for (const k of this.graph.outEdges(id)) {
+        const tgt = this.graph.target(k);
+        if (visited.has(tgt)) {
           edges.push({
-            sourceId: edge.sourceId,
-            targetId: edge.targetId,
-            context: edge.context,
+            sourceId: id,
+            targetId: tgt,
+            context: this.graph.getEdgeAttribute(k, 'context') as string,
           });
         }
       }
@@ -228,14 +239,18 @@ export class KnowledgeGraph {
 
       const tagCounts = new Map<string, number>();
       for (const nid of nodeIds) {
-        const node = this.store.getNode(nid);
+        // Read frontmatter from graph node attrs (loaded in fromStore) — avoids
+        // store.getNode() per community member.
+        const fm = this.graph.hasNode(nid)
+          ? (this.graph.getNodeAttribute(nid, 'frontmatter') as Record<string, unknown> | undefined)
+          : undefined;
         // Mirror index-pipeline.ts's guard: a note can carry non-array
         // `tags:` frontmatter (e.g. `tags: 42`), which round-trips through the
         // store as a scalar. `for...of` over a non-array throws "not iterable"
         // and — since detectCommunities runs at the end of every index() —
         // aborted the whole run after all upsert/embedding work was done.
-        const tags: string[] = Array.isArray(node?.frontmatter?.tags)
-          ? (node.frontmatter.tags as unknown[]).filter((t): t is string => typeof t === 'string')
+        const tags: string[] = Array.isArray(fm?.tags)
+          ? (fm.tags as unknown[]).filter((t): t is string => typeof t === 'string')
           : [];
         for (const tag of tags) tagCounts.set(tag, (tagCounts.get(tag) ?? 0) + 1);
       }
