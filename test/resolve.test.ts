@@ -170,10 +170,14 @@ describe('resolveNodeName', () => {
     expect(matches.every(m => m.matchType === 'substring')).toBe(true);
   });
 
-  // MAJOR-1: resolveNodeName must not degrade to O(N) on large vaults.
-  // With 2000 nodes, an exact-title lookup should hit the idx_nodes_title
-  // index and return in well under 50ms (was: O(N) full-table-scan + N JSON.parse).
-  it('resolveNodeName with 2000 nodes returns an exact-title match in <50ms', () => {
+  // MAJOR-1: resolveNodeName must not degrade to O(N) on large vaults. An
+  // id/exact-title lookup must be served by an indexed SQL query and must NOT
+  // fall through to the getAllNodes() full scan that priorities 2–4 use. We
+  // encode that intent structurally (not via wall-clock, which flakes under
+  // coverage/load and stays green even if the index is removed on a fast box):
+  // make getAllNodes() throw, so any code path that scans blows up. An
+  // exact-title match must still resolve, proving the hot path never scans.
+  it('resolves an exact-title match without touching the getAllNodes() scan', () => {
     const bigStore = new Store(':memory:');
     for (let i = 0; i < 2000; i++) {
       bigStore.upsertNode({
@@ -183,12 +187,24 @@ describe('resolveNodeName', () => {
         frontmatter: { aliases: [`alias-${i}`] },
       });
     }
-    const start = Date.now();
+    // Booby-trap the full scan: if the exact-title path reaches priority 2–4,
+    // this throws and fails the test.
+    let scanCalls = 0;
+    bigStore.getAllNodes = () => {
+      scanCalls++;
+      throw new Error('getAllNodes() scan must not run for an exact-title lookup');
+    };
     const matches = resolveNodeName('Bulk Node 999', bigStore);
-    const elapsed = Date.now() - start;
     expect(matches).toHaveLength(1);
     expect(matches[0].matchType).toBe('exact');
-    expect(elapsed).toBeLessThan(50);
+    expect(matches[0].nodeId).toBe('bulk999.md');
+    expect(scanCalls).toBe(0);
+
+    // Same for an exact-ID lookup (priority 0).
+    const byId = resolveNodeName('bulk123.md', bigStore);
+    expect(byId).toHaveLength(1);
+    expect(byId[0].matchType).toBe('id');
+    expect(scanCalls).toBe(0);
     bigStore.close();
   });
 
@@ -229,5 +245,70 @@ describe('resolveNodeName', () => {
     const matches = resolveNodeName('Good Alias', store);
     expect(matches).toHaveLength(1);
     expect(matches[0].matchType).toBe('alias');
+  });
+
+  // MAJOR: substring resolution must treat a literal `_` in the query as a
+  // plain character, NOT a SQL LIKE single-char wildcard. Before the JS-filter
+  // fix, `LOWER(title) LIKE '%a_b%'` matched 'aXb' (the '_' matched any char),
+  // so kg_annotate_node('a_b') silently appended to the WRONG file.
+  it('treats a literal underscore in the query as a plain char, not a wildcard', () => {
+    const s = new Store(':memory:');
+    s.upsertNode({ id: 'axb.md', title: 'aXb', content: '', frontmatter: {} });
+    // No exact/ci/alias match; substring must NOT match 'aXb' via '_' wildcard.
+    expect(resolveNodeName('a_b', s)).toHaveLength(0);
+    // A genuine literal-underscore title still matches literally.
+    s.upsertNode({ id: 'lit.md', title: 'foo_bar', content: '', frontmatter: {} });
+    const m = resolveNodeName('o_b', s);
+    expect(m).toHaveLength(1);
+    expect(m[0].nodeId).toBe('lit.md');
+    expect(m[0].matchType).toBe('substring');
+    s.close();
+  });
+
+  // MAJOR: a literal `%` must not act as a SQL LIKE match-everything wildcard.
+  // Before the fix, `LOWER(title) LIKE '%%%'` matched every node.
+  it('does not treat a literal percent as a match-all wildcard', () => {
+    const s = new Store(':memory:');
+    s.upsertNode({ id: 'a.md', title: 'Alpha', content: '', frontmatter: {} });
+    s.upsertNode({ id: 'b.md', title: 'Beta', content: '', frontmatter: {} });
+    // '%' appears in no title, so it must match nothing (old LIKE matched all).
+    expect(resolveNodeName('%', s)).toHaveLength(0);
+    s.close();
+  });
+
+  // MINOR: case-insensitive match must be Unicode-correct. SQLite's default
+  // (no-ICU) LOWER() only folds A–Z, so 'ÉCOLE' queried as 'école' returned
+  // [] under the SQL path; JS toLowerCase() folds it correctly.
+  it('matches non-ASCII (accented-Latin) titles case-insensitively', () => {
+    const s = new Store(':memory:');
+    s.upsertNode({ id: 'ecole.md', title: 'ÉCOLE', content: '', frontmatter: {} });
+    const m = resolveNodeName('école', s);
+    expect(m).toHaveLength(1);
+    expect(m[0].nodeId).toBe('ecole.md');
+    expect(m[0].matchType).toBe('case-insensitive');
+    s.close();
+  });
+
+  // MINOR: Turkish-cased title, another non-ASCII case-fold that SQLite's
+  // ASCII LOWER() mishandles.
+  it('matches a Turkish-cased title case-insensitively (Ü fold)', () => {
+    const s = new Store(':memory:');
+    s.upsertNode({ id: 'm.md', title: 'MÜNCHEN', content: '', frontmatter: {} });
+    const m = resolveNodeName('münchen', s);
+    expect(m).toHaveLength(1);
+    expect(m[0].nodeId).toBe('m.md');
+    expect(m[0].matchType).toBe('case-insensitive');
+    s.close();
+  });
+
+  // A CJK title (no case) round-trips through the JS-filter path unchanged.
+  it('resolves a CJK title by exact and substring', () => {
+    const s = new Store(':memory:');
+    s.upsertNode({ id: 'zh.md', title: '知識圖譜', content: '', frontmatter: {} });
+    expect(resolveNodeName('知識圖譜', s)[0].matchType).toBe('exact');
+    const sub = resolveNodeName('圖譜', s);
+    expect(sub).toHaveLength(1);
+    expect(sub[0].matchType).toBe('substring');
+    s.close();
   });
 });

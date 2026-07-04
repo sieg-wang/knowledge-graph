@@ -26,15 +26,20 @@ export function requireMatch(name: string, store: Store): string {
  *
  * Priority 0 (id)              – exact id or id + ".md"      → indexed pk lookup
  * Priority 1 (exact)           – exact title match            → idx_nodes_title
- * Priority 2 (case-insensitive)– LOWER(title) = LOWER(name)  → idx_nodes_title_lower
- * Priority 3 (alias)           – frontmatter.aliases scan     → getAllNodes() full fetch
- * Priority 4 (substring)       – LOWER(title) LIKE %name%    → idx_nodes_title_lower
+ * Priority 2 (case-insensitive)– title.toLowerCase() = name.toLowerCase() → JS scan
+ * Priority 3 (alias)           – frontmatter.aliases scan     → JS scan
+ * Priority 4 (substring)       – title.toLowerCase() includes name.toLowerCase() → JS scan
  *
  * Resolve.ts previously issued a single `SELECT id, title, frontmatter FROM nodes`
  * with no WHERE clause and filtered in JS — parsing every node's frontmatter JSON
- * on every call even when an ID match was available. The new approach uses
- * Store.getAllNodes() only for the alias pass (priority 3) and targeted indexed
- * SQL for all others, so the common paths are O(1) indexed lookups.
+ * on every call even when an ID match was available. The hot paths (id / exact
+ * title) now use targeted indexed SQL. Priorities 2–4 filter in JS over one
+ * Store.getAllNodes() batch fetch: SQLite's default (no-ICU) LOWER() only folds
+ * A–Z (breaking case-insensitive matching for accented-Latin titles) and its
+ * LIKE operator treats a user's literal `_`/`%` as wildcards (a silent
+ * wrong-node match on the write path). JS toLowerCase()/includes() is
+ * Unicode-correct and wildcard-free, so results are identical to the original
+ * pre-index behavior. The scan runs only after the O(1) indexed passes miss.
  */
 export function resolveNodeName(name: string, store: Store): NameMatch[] {
   // Priority 0: exact ID match (with or without .md extension)
@@ -54,20 +59,25 @@ export function resolveNodeName(name: string, store: Store): NameMatch[] {
     return exactRows.map(n => ({ nodeId: n.id, title: n.title, matchType: 'exact' as const }));
   }
 
-  // Priority 2: case-insensitive title match
+  // Priorities 2–4 all require a full node scan; fetch the rows once. Using
+  // getAllNodes() (one batch query) also keeps resolve.ts independent of the
+  // schema's column names.
   const lower = name.toLowerCase();
-  const ciRows = store.db.prepare(
-    'SELECT id, title FROM nodes WHERE LOWER(title) = ?'
-  ).all(lower) as Array<{ id: string; title: string }>;
-  if (ciRows.length > 0) {
-    return ciRows.map(n => ({ nodeId: n.id, title: n.title, matchType: 'case-insensitive' as const }));
-  }
+  const allNodes = store.getAllNodes();
 
-  // Priority 3: alias match — must scan frontmatter; only reached if no title/ID matched.
-  // Uses getAllNodes() (one batch query) instead of accessing store.db directly,
-  // so resolve.ts does not depend on the schema's column names.
+  // Priority 2: case-insensitive title match (JS toLowerCase — Unicode-correct,
+  // unlike SQLite's ASCII-only LOWER()).
+  const ciMatches: NameMatch[] = [];
+  for (const n of allNodes) {
+    if (n.title.toLowerCase() === lower) {
+      ciMatches.push({ nodeId: n.id, title: n.title, matchType: 'case-insensitive' });
+    }
+  }
+  if (ciMatches.length > 0) return ciMatches;
+
+  // Priority 3: alias match — scan frontmatter.
   const aliasMatches: NameMatch[] = [];
-  for (const n of store.getAllNodes()) {
+  for (const n of allNodes) {
     let fm: Record<string, unknown>;
     try { fm = JSON.parse(n.frontmatter); } catch { fm = {}; }
     // Obsidian permits a scalar `aliases: MyAlias` (gray-matter → string),
@@ -86,9 +96,13 @@ export function resolveNodeName(name: string, store: Store): NameMatch[] {
   }
   if (aliasMatches.length > 0) return aliasMatches;
 
-  // Priority 4: substring match on title
-  const substringRows = store.db.prepare(
-    "SELECT id, title FROM nodes WHERE LOWER(title) LIKE ('%' || ? || '%')"
-  ).all(lower) as Array<{ id: string; title: string }>;
-  return substringRows.map(n => ({ nodeId: n.id, title: n.title, matchType: 'substring' as const }));
+  // Priority 4: substring match on title (JS includes — treats the user's
+  // literal `_`/`%` as plain characters, unlike SQL LIKE wildcards).
+  const substringMatches: NameMatch[] = [];
+  for (const n of allNodes) {
+    if (n.title.toLowerCase().includes(lower)) {
+      substringMatches.push({ nodeId: n.id, title: n.title, matchType: 'substring' });
+    }
+  }
+  return substringMatches;
 }

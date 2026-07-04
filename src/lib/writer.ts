@@ -96,8 +96,17 @@ function assertPathInVault(absPath: string, vaultPath: string, nodeId: string): 
   try {
     realPath = realpathSync(absPath);
   } catch {
-    const realDir = realpathSync(dirname(absPath));
-    realPath = join(realDir, basename(absPath));
+    try {
+      const realDir = realpathSync(dirname(absPath));
+      realPath = join(realDir, basename(absPath));
+    } catch {
+      // The containing directory does not exist either (e.g. a traversal id
+      // like `../../nonexistent/foo.md`). We cannot canonicalize symlinks, but
+      // a lexically-resolved (`..`-normalized) path is enough to detect escape:
+      // fall back to it and let the boundary check below throw the clean
+      // "escapes vault" error rather than propagating a raw ENOENT.
+      realPath = resolve(absPath);
+    }
   }
 
   if (!realPath.startsWith(realVault + '/') && realPath !== realVault) {

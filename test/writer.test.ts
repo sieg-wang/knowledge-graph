@@ -231,6 +231,21 @@ describe('VaultWriter', () => {
       ).rejects.toThrow(/escapes vault/);
     });
 
+    // MINOR-C: when BOTH the target file and its parent directory are missing
+    // (e.g. a traversal id whose containing dir does not exist), the guard must
+    // still throw the clean "escapes vault" error — not propagate a raw
+    // ENOENT from the realpathSync fallback. The existing traversal tests only
+    // cover ids whose parent dir happens to exist, so this path was uncovered.
+    it('throws "escapes vault" (not ENOENT) when the escaping parent dir is also missing', async () => {
+      await expect(
+        writer.annotateNode('../../nope-does-not-exist/deep/x.md', 'y'),
+      ).rejects.toThrow(/escapes vault/);
+      // And explicitly assert it is NOT the raw OS error.
+      await expect(
+        writer.annotateNode('../../nope-does-not-exist/deep/x.md', 'y'),
+      ).rejects.not.toThrow(/ENOENT/);
+    });
+
     // Regression (symlink escape): a symlink planted INSIDE the vault pointing
     // to a path outside the vault bypasses the old lexical path.resolve() guard
     // because resolve() returns the symlink's own path (still lexically inside

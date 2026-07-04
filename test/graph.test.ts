@@ -169,6 +169,10 @@ describe('KnowledgeGraph', () => {
     isolatedStore.upsertNode({ id: 'y.md', title: 'Y', content: '', frontmatter: {} });
     const isolatedKg = KnowledgeGraph.fromStore(isolatedStore);
     const central = isolatedKg.centralNodes(10);
+    // Both nodes must be returned — assert length first so the every() below
+    // cannot pass vacuously on an empty array ([].every() === true), which is
+    // the exact empty-result regression this test guards against.
+    expect(central).toHaveLength(2);
     // All nodes have degree 0, so all scores must be 0 (PageRank skipped).
     expect(central.every(n => n.score === 0)).toBe(true);
     isolatedStore.close();
@@ -188,10 +192,12 @@ describe('KnowledgeGraph', () => {
         context: `edge ${i}`,
       });
     }
-    const start = Date.now();
-    KnowledgeGraph.fromStore(bigStore);
-    const elapsed = Date.now() - start;
-    expect(elapsed).toBeLessThan(200);
+    const kg = KnowledgeGraph.fromStore(bigStore);
+    // Correctness, not just speed: an emptied fromStore loop (a mutation that
+    // returns a graph with no nodes/edges) would be FASTER and still pass a
+    // wall-clock-only assertion. Assert every node and edge actually loaded.
+    expect(kg.nodeCount()).toBe(500);
+    expect(kg.edgeCount()).toBe(1000);
     bigStore.close();
   });
 
