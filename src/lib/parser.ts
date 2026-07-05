@@ -83,7 +83,12 @@ export async function parseVault(vaultPath: string): Promise<ParseResult> {
       // (a 100 KB note with 10 links writes 1 MB of context to the DB).
       // The CLI and MCP already truncate to 200 chars for display; the DB
       // should not need the full paragraph.
-      const context = contextRaw.trim().slice(0, 500);
+      // Truncate on a codepoint boundary: plain .slice() counts UTF-16 code
+      // units, so an astral char (emoji, CJK Ext-B) straddling index 500 would
+      // be split into a lone surrogate and PERSISTED as invalid Unicode in the
+      // edges table. Spreading into codepoints first avoids the split (BMP
+      // CJK, one code unit each, is unaffected). (finding parser.ts:86)
+      const context = truncateCodepoints(contextRaw.trim(), 500);
 
       edges.push({
         sourceId: relPath,
@@ -114,9 +119,24 @@ export function sanitizeFrontmatter(data: unknown): Record<string, unknown> {
   return out;
 }
 
+// Truncate to at most `maxCodepoints` Unicode codepoints without splitting an
+// astral-plane character across a UTF-16 surrogate boundary. Exported for unit
+// tests.
+export function truncateCodepoints(str: string, maxCodepoints: number): string {
+  const cps = [...str];
+  return cps.length > maxCodepoints ? cps.slice(0, maxCodepoints).join('') : str;
+}
+
 function extractInlineTags(content: string): string[] {
   const tags = new Set<string>();
-  const pattern = /(?<!\w)#([a-zA-Z][\w-\/]*)/g;
+  // Unicode-aware: the old ASCII pattern (`[a-zA-Z][\w-\/]*`, no /u flag)
+  // silently dropped every non-ASCII inline tag — `#專案管理`, `#日本語`,
+  // accented-Latin — which matters for this vault's zh-TW content. \p{L}
+  // (any letter) + the /u flag matches Obsidian's own non-Latin tag support;
+  // the lookbehind now also treats letters/digits/_ of ANY script as
+  // word chars, so `word#x` / `字#x` stay non-tags (tags need a leading
+  // boundary). Tag body still allows `-`, `_`, `/` for nested tags.
+  const pattern = /(?<![\p{L}\p{N}_])#(\p{L}[\p{L}\p{N}_\-\/]*)/gu;
   let match;
   while ((match = pattern.exec(content)) !== null) {
     tags.add(match[1]);

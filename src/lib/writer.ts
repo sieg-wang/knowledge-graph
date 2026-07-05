@@ -13,6 +13,7 @@ import matter from 'gray-matter';
 import type { Store } from './store.js';
 import { Embedder } from './embedder.js';
 import { resolveNodeName } from './resolve.js';
+import { buildStemLookup, resolveLink } from './wiki-links.js';
 import { sanitizeFrontmatter } from './parser.js';
 
 export interface CreateNodeOptions {
@@ -202,12 +203,6 @@ export class VaultWriter {
       );
     }
 
-    const line = `\n${context} [[${targetRef}]]`;
-    appendFileSync(absPath, line, 'utf-8');
-
-    // Re-index source node
-    await this.indexFile(sourceId);
-
     // Resolve target to actual node ID. Unknown targets must use the same
     // `_stub/` prefix the parser uses (parser.ts emits `_stub/<name>.md`),
     // so the IndexPipeline reconciliation pass can later rewrite them to
@@ -217,8 +212,28 @@ export class VaultWriter {
     // the link is invisible to graph traversal until the next reparse.
     const matches = resolveNodeName(targetRef, this.store);
     let targetId: string;
+    // Text written inside [[ ]]. Defaults to the caller's raw ref so the
+    // common case keeps a human-readable `[[Title]]`.
+    let linkRef = targetRef;
     if (matches.length > 0) {
       targetId = matches[0].nodeId;
+      // resolveNodeName matches by id/title/alias/substring, but a subsequent
+      // full `kg index` re-resolves the SAME written link with resolveLink,
+      // which matches ONLY by filename stem or path. For any note whose
+      // title/alias differs from its filename stem (a common Obsidian pattern:
+      // stem `wt`, title `Widget Theory`) the two disagree — the link written
+      // as the raw title resolves HERE to the real node but re-resolves on the
+      // next index to `_stub/<title>.md`, silently retargeting the edge to a
+      // phantom stub and orphaning the real node's backlink (finding
+      // writer.ts:218). Guard: if the raw ref would NOT re-resolve to this same
+      // node, write a path-qualified link (`<id without .md>`) that resolveLink
+      // maps back exactly. Only rewrites in the mismatch case, so stem==title
+      // links keep their readable `[[Title]]` form.
+      const realPaths = this.store.allNodeIds().filter(id => !id.startsWith('_stub/'));
+      const reparseTarget = resolveLink(targetRef, buildStemLookup(realPaths));
+      if (reparseTarget !== targetId) {
+        linkRef = targetId.replace(/\.md$/, '');
+      }
     } else {
       // Mirror parser semantics EXACTLY: parser.ts emits `_stub/${raw}.md`
       // UNCONDITIONALLY for an unresolved `[[raw]]` — even when raw already
@@ -240,6 +255,14 @@ export class VaultWriter {
         });
       }
     }
+
+    // Append the (possibly path-qualified) wiki link now that linkRef is
+    // known, then re-index the source node so its record/embedding reflect
+    // the new content.
+    const line = `\n${context} [[${linkRef}]]`;
+    appendFileSync(absPath, line, 'utf-8');
+    await this.indexFile(sourceId);
+
     this.store.insertEdge({
       sourceId,
       targetId,

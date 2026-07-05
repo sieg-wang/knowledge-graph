@@ -54,9 +54,6 @@ program
     const config = getConfig();
     mkdirSync(config.dataDir, { recursive: true });
     const store = new Store(config.dbPath);
-    if (opts.force) {
-      store.db.prepare('DELETE FROM sync').run();
-    }
     const embedder = new Embedder();
     await embedder.init();
     const pipeline = new IndexPipeline(store, embedder);
@@ -68,7 +65,9 @@ program
       console.error(`--resolution: must be a positive number (got ${JSON.stringify(opts.resolution)})`);
       process.exit(1);
     }
-    const stats = await pipeline.index(config.vaultPath, resolution);
+    // --force bypasses the incremental mtime skip (full re-parse + re-embed)
+    // WITHOUT wiping the sync table, so deleted-file cleanup still runs.
+    const stats = await pipeline.index(config.vaultPath, resolution, Boolean(opts.force));
     output(stats);
     await embedder.dispose();
     store.close();

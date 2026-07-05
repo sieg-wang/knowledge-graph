@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { mkdtempSync, writeFileSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { parseVault } from '../src/lib/parser.js';
+import { parseVault, truncateCodepoints } from '../src/lib/parser.js';
 
 const FIXTURE_VAULT = join(import.meta.dirname, 'fixtures', 'vault');
 
@@ -55,6 +55,70 @@ describe('parseVault', () => {
     const bob = nodes.find(n => n.id === 'People/Bob Jones.md')!;
     expect(bob.frontmatter.inline_tags).toContain('research');
     expect(bob.frontmatter.inline_tags).toContain('published');
+  });
+
+  // Regression (finding parser.ts:119): the old ASCII-only pattern
+  // (`#[a-zA-Z][\w-\/]*`, no /u) silently dropped every non-ASCII inline tag.
+  // For this vault's zh-TW content that is a systematic loss of tag metadata.
+  // The Unicode-aware \p{L} + /u pattern must capture CJK / accented tags while
+  // still extracting the ASCII tags alongside them.
+  it('extracts non-ASCII (CJK / accented) inline tags', async () => {
+    const tmpVault = mkdtempSync(join(tmpdir(), 'kg-parser-cjk-tags-'));
+    try {
+      writeFileSync(
+        join(tmpVault, 'zh.md'),
+        '在筆記中 #專案管理 和 #research 還有 #日本語 以及巢狀 #領域/子題 和 #café\n',
+        'utf-8',
+      );
+      const { nodes } = await parseVault(tmpVault);
+      const tags = nodes.find(n => n.id === 'zh.md')!.frontmatter.inline_tags as string[];
+      expect(tags).toContain('專案管理');
+      expect(tags).toContain('research');
+      expect(tags).toContain('日本語');
+      expect(tags).toContain('領域/子題');
+      expect(tags).toContain('café');
+    } finally {
+      rmSync(tmpVault, { recursive: true, force: true });
+    }
+  });
+
+  // Regression (finding parser.ts:86): edge context is truncated with a
+  // fixed-length cut and PERSISTED to the DB. A plain .slice() counts UTF-16
+  // code units, so an astral char (emoji) straddling the 500-char boundary was
+  // split into a lone surrogate and stored as invalid Unicode. The cut must
+  // land on a codepoint boundary instead.
+  it('truncates edge context on a codepoint boundary (no split astral char)', async () => {
+    const tmpVault = mkdtempSync(join(tmpdir(), 'kg-parser-astral-'));
+    try {
+      // 499 BMP chars, then an emoji straddling index 499/500, inside a single
+      // no-blank-line paragraph that also contains a wikilink → one edge whose
+      // context is truncated at 500.
+      const body = 'a'.repeat(499) + '🔥' + 'b'.repeat(50) + ' [[Target]] tail';
+      writeFileSync(join(tmpVault, 'src.md'), body + '\n', 'utf-8');
+      const { edges } = await parseVault(tmpVault);
+      const edge = edges.find(e => e.sourceId === 'src.md')!;
+      expect(edge).toBeDefined();
+      // The 500th codepoint is the emoji; it must be kept whole, not split.
+      // Buggy slice(0,500) would end with a lone high surrogate (\uD83D) and
+      // NOT contain the full '🔥'.
+      expect(edge.context.endsWith('🔥')).toBe(true);
+      expect(edge.context.includes('\uD83D') && !edge.context.includes('🔥')).toBe(false);
+    } finally {
+      rmSync(tmpVault, { recursive: true, force: true });
+    }
+  });
+
+  it('truncateCodepoints does not split a surrogate pair at the boundary', () => {
+    // 3 BMP chars + emoji (2 code units). slice(0,4) would keep the high
+    // surrogate only; truncateCodepoints must drop the whole emoji.
+    const s = 'abc🔥xyz';
+    expect(truncateCodepoints(s, 4)).toBe('abc🔥');
+    expect(truncateCodepoints(s, 3)).toBe('abc');
+    // Plain slice would corrupt: prove the helper differs from the buggy path.
+    expect(s.slice(0, 4)).toBe('abc\uD83D'); // lone high surrogate (the bug)
+    expect([...truncateCodepoints(s, 4)].every(c => c.codePointAt(0)! <= 0x10FFFF)).toBe(true);
+    // Shorter than limit → unchanged.
+    expect(truncateCodepoints('hi', 10)).toBe('hi');
   });
 
   it('handles malformed frontmatter gracefully', async () => {

@@ -8,12 +8,15 @@ import type { NameMatch } from './types.js';
 export function requireMatch(name: string, store: Store): string {
   const matches = resolveNodeName(name, store);
   if (matches.length === 0) throw new Error(`No node found matching "${name}"`);
-  if (
-    matches.length > 1
-    && matches[0].matchType !== 'exact'
-    && matches[0].matchType !== 'id'
-    && matches[0].matchType !== 'case-insensitive'
-  ) {
+  // Only `id` is guaranteed unique (it is the PRIMARY KEY). `title` has no
+  // UNIQUE constraint (store.ts:18), so two notes in different directories can
+  // share an exact — or case-insensitively-equal — title (e.g. Projects/Index.md
+  // and Areas/Index.md). Treating exact/case-insensitive multi-hits as
+  // high-confidence and silently returning matches[0] made every downstream
+  // read/write operate on an arbitrary DB-order node with no error. Fail loud
+  // on ANY multi-match except a pure `id` hit, listing candidates so the caller
+  // can disambiguate with a full node ID.
+  if (matches.length > 1 && matches[0].matchType !== 'id') {
     const candidates = matches.map(m => `"${m.title}" (${m.nodeId})`).join(', ');
     throw new Error(`Ambiguous name "${name}". Candidates: ${candidates}. Use the full node ID to disambiguate.`);
   }

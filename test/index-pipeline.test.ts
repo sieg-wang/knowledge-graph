@@ -1,10 +1,11 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { join } from 'path';
-import { mkdtempSync, writeFileSync, rmSync, utimesSync } from 'fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync } from 'fs';
 import { tmpdir } from 'os';
 import { Store } from '../src/lib/store.js';
 import { Embedder } from '../src/lib/embedder.js';
 import { IndexPipeline } from '../src/lib/index-pipeline.js';
+import { VaultWriter } from '../src/lib/writer.js';
 
 const FIXTURE_VAULT = join(import.meta.dirname, 'fixtures', 'vault');
 
@@ -311,6 +312,84 @@ describe('IndexPipeline', () => {
       // reconciliation pass mutated their edges, so communities must rerun.
       expect(second.nodesIndexed).toBe(1);
       expect(second.communitiesDetected).toBeGreaterThan(0);
+    } finally {
+      tmpStore.close();
+      rmSync(tmpVault, { recursive: true, force: true });
+    }
+  });
+
+  // Regression (finding cli/index.ts:57): `kg index --force` used to
+  // `DELETE FROM sync` before indexing, which emptied `previousPaths` and
+  // thereby DISABLED deleted-file detection — a note removed from the vault
+  // kept its node/edges/embedding forever and reappeared in every search.
+  // The fix threads a `force` flag that bypasses the mtime skip WITHOUT wiping
+  // sync, so a forced full rebuild still reconciles deletions. This test bites
+  // both halves: `nodesSkipped === 0` proves force re-indexes everything (the
+  // pre-fix signature ignored the arg → the surviving file would be skipped),
+  // and the orphan-cleanup assertion fails if anyone reintroduces the sync
+  // wipe in the force path.
+  it('force re-index bypasses the mtime skip yet still cleans up deleted files', async () => {
+    const tmpVault = mkdtempSync(join(tmpdir(), 'kg-force-cleanup-'));
+    const tmpStore = new Store(':memory:');
+    const tmpPipeline = new IndexPipeline(tmpStore, embedder);
+
+    try {
+      writeFileSync(join(tmpVault, 'Keep.md'), '# Keep\n\nkeep content.\n');
+      writeFileSync(join(tmpVault, 'Gone.md'), '# Gone\n\ngone content.\n');
+      await tmpPipeline.index(tmpVault);
+      expect(tmpStore.getNode('Gone.md')).toBeDefined();
+
+      // Delete a file from the vault, then force a full rebuild.
+      rmSync(join(tmpVault, 'Gone.md'));
+      const stats = await tmpPipeline.index(tmpVault, 1.0, true);
+
+      // force must re-index the surviving file, not skip it (pre-fix code
+      // ignored the flag and would report nodesSkipped === 1).
+      expect(stats.nodesSkipped).toBe(0);
+      expect(stats.nodesIndexed).toBe(1);
+
+      // The deleted file's node/edges must be gone — no searchable orphan.
+      expect(tmpStore.getNode('Gone.md')).toBeUndefined();
+      expect(tmpStore.allNodeIds()).not.toContain('Gone.md');
+      // sync was NOT wiped: it now tracks the surviving file (and only it).
+      expect([...tmpStore.getAllSyncPaths()]).toEqual(['Keep.md']);
+    } finally {
+      tmpStore.close();
+      rmSync(tmpVault, { recursive: true, force: true });
+    }
+  });
+
+  // Regression (finding writer.ts:218): addLink resolves its target with
+  // resolveNodeName (title/alias/substring), but a subsequent full `kg index`
+  // re-resolves the written link with resolveLink (filename-stem/path only).
+  // For a note whose title ≠ filename stem the two disagreed, so the real edge
+  // addLink created was SILENTLY replaced by a `_stub/<title>.md` edge on the
+  // next index — the real node lost its backlink with no error. The fix writes
+  // a path-qualified link so both resolvers agree.
+  it('addLink by title survives a full re-index without retargeting to a stub', async () => {
+    const tmpVault = mkdtempSync(join(tmpdir(), 'kg-addlink-retarget-'));
+    const tmpStore = new Store(':memory:');
+    const tmpPipeline = new IndexPipeline(tmpStore, embedder);
+
+    try {
+      // Target's filename STEM (wt) differs from its frontmatter TITLE.
+      mkdirSync(join(tmpVault, 'notes'), { recursive: true });
+      writeFileSync(join(tmpVault, 'notes', 'wt.md'), '---\ntitle: Widget Theory\n---\n# WT\n\nbody\n');
+      writeFileSync(join(tmpVault, 'source.md'), '# Source\n\nbody\n');
+      await tmpPipeline.index(tmpVault);
+
+      // addLink by TITLE — resolves to the real node notes/wt.md.
+      const writer = new VaultWriter(tmpVault, tmpStore);
+      await writer.addLink('source.md', 'Widget Theory', 'see also');
+      expect(tmpStore.getEdgesFrom('source.md').some(e => e.targetId === 'notes/wt.md')).toBe(true);
+
+      // Force a full re-index (deterministic reparse regardless of mtime
+      // granularity). The written link must re-resolve to the SAME real node.
+      await tmpPipeline.index(tmpVault, 1.0, true);
+      const edges = tmpStore.getEdgesFrom('source.md');
+      expect(edges.some(e => e.targetId === 'notes/wt.md')).toBe(true);
+      expect(edges.some(e => e.targetId.startsWith('_stub/'))).toBe(false);
+      expect(tmpStore.getNode('_stub/Widget Theory.md')).toBeUndefined();
     } finally {
       tmpStore.close();
       rmSync(tmpVault, { recursive: true, force: true });

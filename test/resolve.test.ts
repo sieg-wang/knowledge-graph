@@ -44,21 +44,49 @@ describe('requireMatch (MCP disambiguation)', () => {
     expect(() => requireMatch('Smith', store)).toThrow('Ambiguous');
   });
 
-  it('does not throw on multi-result exact match', () => {
+  // Behavior change (finding resolve.ts:11): `title` has NO UNIQUE constraint,
+  // so two notes in different directories can share an exact title. The old
+  // code treated exact/case-insensitive multi-hits as high-confidence and
+  // silently returned matches[0] (arbitrary DB order) — every downstream
+  // read/write then operated on the WRONG node with no error. These tests
+  // pin the fail-loud contract: multi-match on anything but a pure `id` hit
+  // must throw AND list all candidates so the caller can disambiguate. A
+  // mutation that reverts to pick-first, or throws without naming candidates,
+  // fails here (the old tests survived the bug by asserting pick-first).
+  it('throws on multi-result exact-title match, listing both candidates', () => {
     store.upsertNode({
       id: 'dup.md', title: 'Alice Smith',
       content: '', frontmatter: {},
     });
-    expect(requireMatch('Alice Smith', store)).toBe('People/Alice Smith.md');
+    expect(() => requireMatch('Alice Smith', store)).toThrow('Ambiguous');
+    try {
+      requireMatch('Alice Smith', store);
+      throw new Error('should have thrown');
+    } catch (e: any) {
+      expect(e.message).toContain('People/Alice Smith.md');
+      expect(e.message).toContain('dup.md');
+    }
   });
 
-  it('does not throw on case-insensitive multi-match', () => {
-    store.upsertNode({
-      id: 'lower.md', title: 'widget theory',
-      content: '', frontmatter: {},
-    });
-    // "widget theory" matches both via case-insensitive — should pick first, not throw
-    expect(() => requireMatch('widget theory', store)).not.toThrow();
+  it('throws on case-insensitive multi-match, listing both candidates', () => {
+    // Query "Index" equals NEITHER title by case (so the exact-case Priority-1
+    // pass misses) but matches both case-insensitively → genuine ambiguity.
+    store.upsertNode({ id: 'Projects/INDEX.md', title: 'INDEX', content: '', frontmatter: {} });
+    store.upsertNode({ id: 'Areas/index.md', title: 'index', content: '', frontmatter: {} });
+    expect(() => requireMatch('Index', store)).toThrow('Ambiguous');
+    try {
+      requireMatch('Index', store);
+      throw new Error('should have thrown');
+    } catch (e: any) {
+      expect(e.message).toContain('Projects/INDEX.md');
+      expect(e.message).toContain('Areas/index.md');
+    }
+  });
+
+  it('still resolves a UNIQUE exact/case-insensitive title without throwing', () => {
+    // Guard the guard: single hits must NOT regress into false ambiguity.
+    expect(requireMatch('Alice Smith', store)).toBe('People/Alice Smith.md');
+    expect(requireMatch('alice smith', store)).toBe('People/Alice Smith.md');
   });
 
   it('throws on ambiguous alias match', () => {

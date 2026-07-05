@@ -19,7 +19,16 @@ export class IndexPipeline {
     private embedder: Embedder,
   ) {}
 
-  async index(vaultPath: string, resolution = 1.0): Promise<IndexStats> {
+  // `force` bypasses the mtime skip so every file is re-parsed and re-embedded
+  // (a true full rebuild). It deliberately does NOT wipe the sync table: the
+  // CLI's old `--force` path did `DELETE FROM sync`, which emptied
+  // `previousPaths` below and thereby DISABLED deleted-file detection — nodes,
+  // edges, and embeddings for files removed from the vault survived a
+  // `--force` run indefinitely and kept surfacing in search (finding
+  // cli/index.ts:57). Keeping sync intact lets the deletion loop run while
+  // force re-indexes everything; upsertSync overwrites stale mtimes so the
+  // sync table still self-heals.
+  async index(vaultPath: string, resolution = 1.0, force = false): Promise<IndexStats> {
     const stats: IndexStats = {
       nodesIndexed: 0,
       nodesSkipped: 0,
@@ -83,7 +92,7 @@ export class IndexPipeline {
       // restore, rsync, and Dropbox routinely backdate a CHANGED file's mtime
       // to <= the recorded value, which then silently retained stale content,
       // edges, and embeddings. Any mtime difference (up or down) must re-index.
-      if (prevMtime !== undefined && prevMtime === mtime) {
+      if (!force && prevMtime !== undefined && prevMtime === mtime) {
         stats.nodesSkipped++;
         continue;
       }
