@@ -6,6 +6,13 @@ import type { NameMatch } from './types.js';
  * Used by MCP tool handlers as the entry point for all fuzzy name resolution.
  */
 export function requireMatch(name: string, store: Store): string {
+  // Fail loud before any DB access: an empty or whitespace-only name would
+  // flow through all priority passes and reach priority-4 substring, where
+  // JS `''.includes('') === true` unconditionally, making every node a
+  // "match". requireMatch then throws "Ambiguous name \"\"" and lists every
+  // node — confusing callers into thinking 300 nodes are all titled '' — or,
+  // in a single-node store, silently returns the wrong node with no error.
+  if (!name.trim()) throw new Error(`name cannot be empty`);
   const matches = resolveNodeName(name, store);
   if (matches.length === 0) throw new Error(`No node found matching "${name}"`);
   // Only `id` is guaranteed unique (it is the PRIMARY KEY). `title` has no
@@ -45,6 +52,11 @@ export function requireMatch(name: string, store: Store): string {
  * pre-index behavior. The scan runs only after the O(1) indexed passes miss.
  */
 export function resolveNodeName(name: string, store: Store): NameMatch[] {
+  // Guard: an empty or whitespace-only name matches nothing meaningful.
+  // Priority-4 substring uses JS `includes('')` which is unconditionally true,
+  // so without this guard every node appears as a "substring" hit for ''.
+  if (!name.trim()) return [];
+
   // Priority 0: exact ID match (with or without .md extension)
   const nameWithMd = name.endsWith('.md') ? name : name + '.md';
   const idRows = store.db.prepare(

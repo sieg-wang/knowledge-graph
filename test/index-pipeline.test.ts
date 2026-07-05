@@ -437,4 +437,57 @@ describe('IndexPipeline', () => {
       rmSync(tmpVault, { recursive: true, force: true });
     }
   });
+
+  // Finding #34: clearCommunities + upsertCommunity loop is not atomic.
+  // Without a transaction wrapper, a throw inside upsertCommunity (e.g. a
+  // SIGKILL arriving between the committed DELETE and a mid-loop INSERT in WAL
+  // mode) leaves the communities table empty or partially populated. Every
+  // subsequent `kg_central --community N` call then fails with "Community N
+  // not found" for any community whose INSERT was never committed.
+  // Intent: the swap must be all-or-nothing: either all new communities land or
+  // the old set is preserved intact, never an empty/partial intermediate state.
+  it('community swap is atomic — a throw mid-loop preserves old communities, not empty/partial state', async () => {
+    const tmpVault = mkdtempSync(join(tmpdir(), 'kg-community-atomic-'));
+    const tmpStore = new Store(':memory:');
+    const tmpPipeline = new IndexPipeline(tmpStore, embedder);
+
+    try {
+      // Three-node triangle: guaranteed to yield at least one community.
+      writeFileSync(join(tmpVault, 'A.md'), '# A\n[[B]]\n[[C]]\n');
+      writeFileSync(join(tmpVault, 'B.md'), '# B\n[[A]]\n[[C]]\n');
+      writeFileSync(join(tmpVault, 'C.md'), '# C\n[[A]]\n[[B]]\n');
+
+      // First run: establish a known community set.
+      await tmpPipeline.index(tmpVault);
+      const oldCommunities = tmpStore.getAllCommunities();
+      expect(oldCommunities.length).toBeGreaterThan(0);
+      const oldIds = oldCommunities.map(c => c.id).sort((a, b) => a - b);
+
+      // Patch upsertCommunity to throw on the very first call, simulating a
+      // crash that arrives after clearCommunities() has committed its DELETE
+      // but before any INSERT completes (the worst-case partial-state scenario).
+      let callCount = 0;
+      const origUpsert = tmpStore.upsertCommunity.bind(tmpStore);
+      tmpStore.upsertCommunity = (c: Parameters<typeof tmpStore.upsertCommunity>[0]) => {
+        if (++callCount === 1) throw new Error('simulated mid-loop crash');
+        origUpsert(c);
+      };
+
+      // Add a new file so nodesIndexed > 0, forcing community re-detection.
+      writeFileSync(join(tmpVault, 'D.md'), '# D\n[[A]]\n');
+
+      // Second run: index() must reject because upsertCommunity throws.
+      await expect(tmpPipeline.index(tmpVault)).rejects.toThrow('simulated mid-loop crash');
+
+      // After the failed swap the communities table must still reflect the OLD
+      // set — not be empty (crash after DELETE, before first INSERT).
+      // Without the transaction fix, getAllCommunities() returns [] here because
+      // clearCommunities() already committed its DELETE before the throw.
+      const afterIds = tmpStore.getAllCommunities().map(c => c.id).sort((a, b) => a - b);
+      expect(afterIds).toEqual(oldIds);
+    } finally {
+      tmpStore.close();
+      rmSync(tmpVault, { recursive: true, force: true });
+    }
+  });
 });

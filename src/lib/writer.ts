@@ -149,10 +149,12 @@ export class VaultWriter {
     const fileContent = matter.stringify(opts.content, fm);
 
     // Atomic publish: write to a sibling tmp path, then rename. A crash
-    // mid-write leaves the tmp file behind (which we clean up on the next
-    // attempt via the existsSync(absPath) guard above) instead of a
-    // half-written <title>.md that subsequent indexing would treat as a
-    // real, corrupt node.
+    // mid-write leaves the tmp file behind — the path is PID+timestamp-
+    // qualified so it is never referenced again and accumulates silently as
+    // vault clutter (non-.md files are ignored by collectMarkdownFiles, so
+    // indexing is unaffected). The existsSync(absPath) guard above prevents
+    // re-creation of the final .md if a previous rename succeeded on a retry;
+    // it does NOT scan for or unlink stale *.md.tmp.* files from prior runs.
     const tmpPath = `${absPath}.tmp.${process.pid}.${Date.now()}`;
     try {
       writeFileSync(tmpPath, fileContent, 'utf-8');

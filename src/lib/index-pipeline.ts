@@ -205,10 +205,20 @@ export class IndexPipeline {
     ) {
       const kg = KnowledgeGraph.fromStore(this.store);
       const communities = kg.detectCommunities(resolution);
-      this.store.clearCommunities();
-      for (const c of communities) {
-        this.store.upsertCommunity(c);
-      }
+      // Atomic swap: wrap clear + upsert in a single transaction so that a
+      // crash or throw mid-loop leaves the communities table in its OLD state
+      // rather than empty (crash before first INSERT) or partial (crash
+      // mid-loop). Without this, WAL mode's per-statement auto-commit means
+      // clearCommunities() commits its DELETE alone, and any subsequent kill
+      // makes getAllCommunities() return 0..K of the N expected communities
+      // with no error — every kg_central --community M call then fails with
+      // "Community M not found" for any community whose INSERT never ran.
+      this.store.db.transaction(() => {
+        this.store.clearCommunities();
+        for (const c of communities) {
+          this.store.upsertCommunity(c);
+        }
+      })();
       stats.communitiesDetected = communities.length;
     }
 

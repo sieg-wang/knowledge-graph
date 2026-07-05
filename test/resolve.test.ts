@@ -97,6 +97,21 @@ describe('requireMatch (MCP disambiguation)', () => {
     // "A. Smith" matches both Alice Smith and Other via alias
     expect(() => requireMatch('A. Smith', store)).toThrow('Ambiguous');
   });
+
+  // Finding #35: empty/whitespace-only name flows through all resolution passes
+  // because JS `'anything'.includes('') === true`, so priority-4 substring match
+  // returns EVERY node. requireMatch then throws "Ambiguous name \"\"" and lists
+  // every node — confusing the LLM into thinking 300 nodes are all titled ''.
+  // A single-node vault is worse: requireMatch silently returns the one node
+  // (wrong result, no error).
+  // Intent: fail loud with a clear "cannot be empty" error before any DB access.
+  it('requireMatch throws "cannot be empty" for an empty string, not "Ambiguous"', () => {
+    expect(() => requireMatch('', store)).toThrow(/cannot be empty/i);
+  });
+
+  it('requireMatch throws "cannot be empty" for a whitespace-only string', () => {
+    expect(() => requireMatch('   ', store)).toThrow(/cannot be empty/i);
+  });
 });
 
 describe('resolveNodeName', () => {
@@ -337,6 +352,35 @@ describe('resolveNodeName', () => {
     const sub = resolveNodeName('圖譜', s);
     expect(sub).toHaveLength(1);
     expect(sub[0].matchType).toBe('substring');
+    s.close();
+  });
+
+  // Finding #35 (resolveNodeName half): an empty name must return [] and must
+  // NOT fall through to priority-4 substring, where JS `''.includes('')` is
+  // unconditionally true and every node becomes a "match". Without the guard,
+  // resolveNodeName('', store) returns all nodes as substring hits — the caller
+  // (requireMatch) then throws "Ambiguous name \"\"" listing every node, or
+  // silently returns the one node in a single-node store (wrong result).
+  it('resolveNodeName returns [] for an empty string, not all nodes as substring hits', () => {
+    const s = new Store(':memory:');
+    s.upsertNode({ id: 'one.md', title: 'One', content: '', frontmatter: {} });
+    s.upsertNode({ id: 'two.md', title: 'Two', content: '', frontmatter: {} });
+    const matches = resolveNodeName('', s);
+    expect(matches).toHaveLength(0);
+    s.close();
+  });
+
+  it('resolveNodeName returns [] for a whitespace-only string', () => {
+    const s = new Store(':memory:');
+    // 'A   B' (three internal spaces) is required: without the guard,
+    // priority-4 does `'a   b'.includes('   ')` which is true, so the
+    // substring pass WOULD return this node as a match. With the guard
+    // (`if (!name.trim()) return []`) it never reaches that check.
+    // A title like 'One' (no spaces) is vacuous — '   ' is not a
+    // substring of 'one', so the test passes even on reverted code.
+    s.upsertNode({ id: 'a-b.md', title: 'A   B', content: '', frontmatter: {} });
+    const matches = resolveNodeName('   ', s);
+    expect(matches).toHaveLength(0);
     s.close();
   });
 });
