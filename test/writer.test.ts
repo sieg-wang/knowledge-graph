@@ -379,6 +379,28 @@ describe('VaultWriter', () => {
       expect(edges.some(e => e.targetId.startsWith('_stub/'))).toBe(false);
     });
 
+    // Perf regression guard (finding writer.ts:232): an exact-ID match always
+    // re-resolves to the same node via resolveLink's direct-path lookup, so the
+    // reparse-consistency guard's O(N) allNodeIds() full-table scan is vacuous
+    // for id matches and must be short-circuited. Booby-trap allNodeIds() to
+    // throw: if the id short-circuit is removed, the guard runs the scan and
+    // this call blows up. (Behavior is unchanged — the edge still resolves.)
+    it('does not run the O(N) allNodeIds() scan when the target is an exact-ID match', async () => {
+      await writer.createNode({ title: 'Source', frontmatter: {}, content: 'x' });
+      store.upsertNode({ id: 'People/Bob.md', title: 'Bob', content: '', frontmatter: {} });
+
+      (store as unknown as { allNodeIds: () => string[] }).allNodeIds = () => {
+        throw new Error('allNodeIds must not be called for an id-matched addLink');
+      };
+
+      // Link by full ID (priority-0 match) — must succeed without scanning.
+      await writer.addLink('Source.md', 'People/Bob.md', 'Hi Bob.');
+
+      const edges = store.getEdgesFrom('Source.md');
+      expect(edges.some(e => e.targetId === 'People/Bob.md')).toBe(true);
+      expect(edges.some(e => e.targetId.startsWith('_stub/'))).toBe(false);
+    });
+
     it('picks first match when target resolves ambiguously', async () => {
       await writer.createNode({
         title: 'Source',
@@ -418,6 +440,34 @@ describe('VaultWriter', () => {
       expect(stub).toBeDefined();
       // Exactly one stub node with that ID.
       expect(store.allNodeIds().filter(id => id === '_stub/Unknown.md')).toHaveLength(1);
+    });
+
+    // Regression (finding writer.ts:218): the SECOND addLink to the same
+    // still-unresolvable target must write the SAME readable `[[Target]]` link
+    // the first call wrote — never the internal `[[_stub/Target]]` form. On
+    // the second call resolveNodeName exact-title-matches the stub node minted
+    // by the first call, so pre-fix code took the resolved branch, saw the
+    // reparse-guard's resolveLink return null (stubs are not real files) and
+    // rewrote the link to `[[_stub/Target]]`. That literal re-parses on the
+    // next full index to a DIFFERENT double-nested stub (_stub/_stub/Target.md),
+    // silently fragmenting the two links. The fix routes a stub-node match
+    // through the unresolved branch so both calls emit identical output.
+    it('writes a readable [[Target]] (never [[_stub/...]]) on the second addLink to the same unknown target', async () => {
+      await writer.createNode({ title: 'Source', frontmatter: {}, content: 'x' });
+      await writer.addLink('Source.md', 'Unknown', 'first context');
+      await writer.addLink('Source.md', 'Unknown', 'second context');
+
+      const raw = readFileSync(join(tempVault, 'Source.md'), 'utf-8');
+      // No line may contain the internal `_stub/` prefix — that prefix is an
+      // implementation detail and must never leak into vault markdown.
+      expect(raw).not.toContain('[[_stub/');
+      // Both appended links are the readable form.
+      expect(raw.match(/\[\[Unknown\]\]/g) ?? []).toHaveLength(2);
+
+      // Both edges point at the one parser-shaped stub; no double-nested stub.
+      const edges = store.getEdgesFrom('Source.md');
+      expect(edges.every(e => e.targetId === '_stub/Unknown.md')).toBe(true);
+      expect(store.allNodeIds().some(id => id.startsWith('_stub/_stub/'))).toBe(false);
     });
 
     // ── Codex review #11: wiki-link injection via unescaped target/context ──

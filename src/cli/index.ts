@@ -49,7 +49,7 @@ program
   .command('index')
   .description('Parse vault and build/update the knowledge graph')
   .option('--resolution <number>', 'Louvain resolution parameter', '1.0')
-  .option('--force', 'Force full re-index (ignore sync state)')
+  .option('--force', 'Force full re-index: re-parse and re-embed every file, bypassing the mtime skip. Deletion detection still runs (sync table preserved).')
   .action(async (opts) => {
     const config = getConfig();
     mkdirSync(config.dataDir, { recursive: true });

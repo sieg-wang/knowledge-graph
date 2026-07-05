@@ -395,4 +395,46 @@ describe('IndexPipeline', () => {
       rmSync(tmpVault, { recursive: true, force: true });
     }
   });
+
+  // Regression (finding writer.ts:218): the common MCP pattern where Claude
+  // links several notes to a concept that does not exist yet. Each addLink to
+  // the same unresolvable target must survive a full re-index as ONE shared
+  // stub — not fragment into a double-nested `_stub/_stub/…` stub for every
+  // call after the first. Pre-fix, the 2nd+ addLink wrote `[[_stub/Concept]]`,
+  // which reparsed to a distinct `_stub/_stub/Concept.md` node.
+  it('links from two sources to the same unresolved target share one stub across a full re-index', async () => {
+    const tmpVault = mkdtempSync(join(tmpdir(), 'kg-addlink-sharedstub-'));
+    const tmpStore = new Store(':memory:');
+    const tmpPipeline = new IndexPipeline(tmpStore, embedder);
+
+    try {
+      writeFileSync(join(tmpVault, 'alpha.md'), '# Alpha\n\nbody\n');
+      writeFileSync(join(tmpVault, 'beta.md'), '# Beta\n\nbody\n');
+      await tmpPipeline.index(tmpVault);
+
+      const writer = new VaultWriter(tmpVault, tmpStore);
+      // Both sources link to a concept with no backing file.
+      await writer.addLink('alpha.md', 'FutureConcept', 'see also');
+      await writer.addLink('beta.md', 'FutureConcept', 'related');
+
+      // Force a full re-index (deterministic reparse regardless of mtime).
+      await tmpPipeline.index(tmpVault, 1.0, true);
+
+      // Every edge from either source targets the single parser-shaped stub.
+      const allEdges = [
+        ...tmpStore.getEdgesFrom('alpha.md'),
+        ...tmpStore.getEdgesFrom('beta.md'),
+      ];
+      expect(allEdges.length).toBeGreaterThan(0);
+      expect(allEdges.every(e => e.targetId === '_stub/FutureConcept.md')).toBe(true);
+
+      // Exactly one stub, and no double-nested stub leaked in.
+      const stubs = tmpStore.allNodeIds().filter(id => id.startsWith('_stub/'));
+      expect(stubs).toEqual(['_stub/FutureConcept.md']);
+      expect(tmpStore.allNodeIds().some(id => id.startsWith('_stub/_stub/'))).toBe(false);
+    } finally {
+      tmpStore.close();
+      rmSync(tmpVault, { recursive: true, force: true });
+    }
+  });
 });

@@ -215,8 +215,22 @@ export class VaultWriter {
     // Text written inside [[ ]]. Defaults to the caller's raw ref so the
     // common case keeps a human-readable `[[Title]]`.
     let linkRef = targetRef;
-    if (matches.length > 0) {
-      targetId = matches[0].nodeId;
+    // A match against an already-existing STUB node (`_stub/` prefix) must be
+    // treated as UNRESOLVED, not resolved. A stub is not a real vault file, so
+    // the reparse guard's resolveLink (which only knows real files) can never
+    // re-resolve to it — the guard would always fire and rewrite the readable
+    // `[[Target]]` into the internal `[[_stub/Target]]` form. That literal then
+    // re-parses on the next full index to a DIFFERENT double-nested stub
+    // (`_stub/_stub/Target.md`), silently fragmenting repeated links to the
+    // same not-yet-created topic (finding writer.ts:218). Routing stub matches
+    // through the else branch mints the parser-shaped `_stub/<ref>.md` id
+    // (idempotent with the first call) and keeps the link text readable.
+    const resolved =
+      matches.length > 0 && !matches[0].nodeId.startsWith('_stub/')
+        ? matches[0]
+        : null;
+    if (resolved) {
+      targetId = resolved.nodeId;
       // resolveNodeName matches by id/title/alias/substring, but a subsequent
       // full `kg index` re-resolves the SAME written link with resolveLink,
       // which matches ONLY by filename stem or path. For any note whose
@@ -229,10 +243,19 @@ export class VaultWriter {
       // node, write a path-qualified link (`<id without .md>`) that resolveLink
       // maps back exactly. Only rewrites in the mismatch case, so stem==title
       // links keep their readable `[[Title]]` form.
-      const realPaths = this.store.allNodeIds().filter(id => !id.startsWith('_stub/'));
-      const reparseTarget = resolveLink(targetRef, buildStemLookup(realPaths));
-      if (reparseTarget !== targetId) {
-        linkRef = targetId.replace(/\.md$/, '');
+      //
+      // Skip the guard for priority-0 (id) matches: an id match means
+      // targetRef (normalized to +`.md`) already equals targetId, and
+      // resolveLink resolves that same ref by direct-path lookup to the same
+      // id — so reparseTarget === targetId always and the O(N) allNodeIds()
+      // scan is vacuous. Only title/alias/substring matches can disagree with
+      // the stem-based reparse and need the scan (finding writer.ts:232).
+      if (resolved.matchType !== 'id') {
+        const realPaths = this.store.allNodeIds().filter(id => !id.startsWith('_stub/'));
+        const reparseTarget = resolveLink(targetRef, buildStemLookup(realPaths));
+        if (reparseTarget !== targetId) {
+          linkRef = targetId.replace(/\.md$/, '');
+        }
       }
     } else {
       // Mirror parser semantics EXACTLY: parser.ts emits `_stub/${raw}.md`
