@@ -25,9 +25,9 @@ jobs:
         run: npm run build
 
       - name: Vitest
-        # --no-file-parallelism: three suites (embedder, search, index-pipeline)
+        # npm test includes --no-file-parallelism: three suites (embedder, search, index-pipeline)
         # share the Xenova/all-MiniLM-L6-v2 model. Running them in parallel
         # races on the download and corrupts the ONNX file with a protobuf
         # parse error. Serial test-file execution lets the first download
         # win and the rest reuse the cached model.
-        run: npx vitest run --no-file-parallelism
+        run: npm test

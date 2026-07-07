@@ -105,7 +105,7 @@ No LLM inside the tool — the agent does the reasoning, the tool provides the d
 | Full-text search | SQLite FTS5 |
 | Embeddings | @huggingface/transformers |
 | MCP server | @modelcontextprotocol/sdk |
-| Tests | vitest (76 tests) |
+| Tests | vitest (76 tests; `npm test` runs with `--no-file-parallelism`) |
 
 ## Known quirks
 
