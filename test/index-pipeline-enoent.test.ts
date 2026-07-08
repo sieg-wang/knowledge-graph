@@ -1,91 +1,145 @@
 /**
- * MAJOR-4 regression test: stat() ENOENT must not abort the entire index run.
+ * parseVault must tolerate weird / vanishing directory entries instead of
+ * aborting the whole index run (or leaking out-of-vault content):
  *
- * index-pipeline.ts calls `stat(join(vaultPath, node.id))` for each file in
- * parseVault's snapshot. A file deleted between parseVault() and the stat loop
- * (e.g. by a sync client, concurrent process, or the user) used to propagate
- * uncaught, leaving the store in a partially-updated state. The fix wraps stat
- * in a try-catch that increments nodesSkipped and continues.
+ *  - A regular *.md file deleted between readdir() and readFile() → skip,
+ *    don't throw (finding parser.ts:29, was "MAJOR-4" on the stat window).
+ *  - A dangling *.md symlink → skip, don't abort (finding parser.ts:162 / :29).
+ *  - A *.md symlink whose target is OUTSIDE the vault → exclude its content,
+ *    never index a secret file's bytes (finding parser.ts:162, B-5).
+ *  - A symlink to a DIRECTORY named *.md → no EISDIR abort (finding B-5).
  *
- * We use vi.mock to inject the ENOENT without relying on real filesystem races.
+ * The regular-file race is injected with a readFile mock; the symlink cases use
+ * real symlinks so they exercise collectMarkdownFiles' dirent handling.
  */
-import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { join } from 'path';
-import { mkdtempSync, writeFileSync, rmSync } from 'fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  symlinkSync,
+  rmSync,
+} from 'fs';
 import { tmpdir } from 'os';
 
-// --- stat mock setup (must be before any import that pulls in index-pipeline) ---
-
-// statMockTarget: when set to a filename suffix, the next stat call matching
-// that path throws ENOENT once, then resets. All other calls pass through.
-let statMockTarget: string | null = null;
+// readFileMockTarget: when set to a path suffix, the next readFile matching it
+// throws ENOENT once (simulating a delete between readdir and readFile), then
+// resets. All other calls pass through to the real implementation.
+let readFileMockTarget: string | null = null;
 
 vi.mock('fs/promises', async (importOriginal) => {
   const mod = await importOriginal<typeof import('fs/promises')>();
   return {
     ...mod,
-    stat: vi.fn().mockImplementation(async (p: unknown, ...rest: unknown[]) => {
-      if (statMockTarget && String(p).endsWith(statMockTarget)) {
-        statMockTarget = null; // fire once
-        const err = Object.assign(new Error(`ENOENT: no such file or directory, stat '${p}'`), {
-          code: 'ENOENT',
-        });
-        throw err;
+    readFile: vi.fn(async (p: unknown, ...rest: unknown[]) => {
+      if (readFileMockTarget && String(p).endsWith(readFileMockTarget)) {
+        readFileMockTarget = null;
+        throw Object.assign(
+          new Error(`ENOENT: no such file or directory, open '${p}'`),
+          { code: 'ENOENT' },
+        );
       }
-      return mod.stat(p as any, ...(rest as any[]));
+      return mod.readFile(p as never, ...(rest as never[]));
     }),
   };
 });
 
-// Imports must come AFTER the vi.mock call so the mock is active.
+// Imports come AFTER vi.mock so the mock is active.
 import { Store } from '../src/lib/store.js';
 import { Embedder } from '../src/lib/embedder.js';
 import { IndexPipeline } from '../src/lib/index-pipeline.js';
+import { parseVault } from '../src/lib/parser.js';
 
-describe('IndexPipeline ENOENT handling (MAJOR-4)', () => {
-  let store: Store;
-  let embedder: Embedder;
-  let pipeline: IndexPipeline;
+const stubEmbedder = { embed: async () => new Float32Array(384) } as unknown as Embedder;
 
-  beforeAll(async () => {
-    store = new Store(':memory:');
-    embedder = new Embedder();
-    await embedder.init();
-    pipeline = new IndexPipeline(store, embedder);
-  }, 60000);
+describe('parseVault: vanishing / non-regular entries', () => {
+  it('skips a regular file that disappears between readdir and readFile, keeps survivors', async () => {
+    const tmpVault = mkdtempSync(join(tmpdir(), 'kg-enoent-'));
+    try {
+      writeFileSync(join(tmpVault, 'Alive.md'), '# Alive\nsurvives\n', 'utf-8');
+      writeFileSync(join(tmpVault, 'Gone.md'), '# Gone\ndisappears\n', 'utf-8');
 
-  afterAll(async () => {
-    store.close();
-    await embedder.dispose();
+      readFileMockTarget = 'Gone.md';
+      const { nodes } = await parseVault(tmpVault);
+      const ids = nodes.map(n => n.id);
+
+      expect(ids).toContain('Alive.md');
+      expect(ids).not.toContain('Gone.md');
+    } finally {
+      readFileMockTarget = null;
+      rmSync(tmpVault, { recursive: true, force: true });
+    }
   });
 
-  it('skips a file that disappears between parseVault and stat, and continues indexing survivors', async () => {
-    const tmpVault = mkdtempSync(join(tmpdir(), 'kg-enoent-'));
-
+  it('skips a dangling *.md symlink without aborting the parse', async () => {
+    const tmpVault = mkdtempSync(join(tmpdir(), 'kg-dangling-'));
     try {
-      writeFileSync(join(tmpVault, 'Alive.md'), '# Alive\nThis one survives.\n', 'utf-8');
-      writeFileSync(join(tmpVault, 'Gone.md'), '# Gone\nThis one disappears.\n', 'utf-8');
+      writeFileSync(join(tmpVault, 'real.md'), '# Real\ncontent\n', 'utf-8');
+      // Points at a target that does not exist → readFile would ENOENT.
+      symlinkSync('./missing-target.md', join(tmpVault, 'ghost.md'));
 
-      // Trigger the mock to throw ENOENT when stat() is called for Gone.md.
-      // This simulates the file being deleted BETWEEN parseVault (which lists
-      // it) and the stat loop in index-pipeline.ts.
-      statMockTarget = 'Gone.md';
+      const { nodes } = await parseVault(tmpVault);
+      const ids = nodes.map(n => n.id);
+      expect(ids).toContain('real.md');
+      expect(ids).not.toContain('ghost.md');
+    } finally {
+      rmSync(tmpVault, { recursive: true, force: true });
+    }
+  });
 
-      const stats = await pipeline.index(tmpVault);
+  it('does not index the content of a *.md symlink pointing outside the vault', async () => {
+    const tmpVault = mkdtempSync(join(tmpdir(), 'kg-leak-'));
+    const outsideDir = mkdtempSync(join(tmpdir(), 'kg-outside-'));
+    const sentinel = 'TOP-SECRET-PRIVATE-KEY-SENTINEL';
+    try {
+      writeFileSync(join(outsideDir, 'secret.txt'), `${sentinel}\n`, 'utf-8');
+      writeFileSync(join(tmpVault, 'real.md'), '# Real\ncontent\n', 'utf-8');
+      symlinkSync(join(outsideDir, 'secret.txt'), join(tmpVault, 'leak.md'));
 
-      // Alive.md must be indexed; Gone.md must be counted as skipped, not crashed.
-      expect(stats.nodesIndexed).toBe(1);
-      expect(stats.nodesSkipped).toBe(1);
+      const { nodes } = await parseVault(tmpVault);
+      // The out-of-vault secret must never enter the parsed corpus.
+      expect(nodes.some(n => n.content.includes(sentinel))).toBe(false);
+      expect(nodes.map(n => n.id)).not.toContain('leak.md');
+    } finally {
+      rmSync(tmpVault, { recursive: true, force: true });
+      rmSync(outsideDir, { recursive: true, force: true });
+    }
+  });
 
-      // Alive.md must be findable in the store.
-      const alive = store.getNode('Alive.md');
-      expect(alive).toBeDefined();
-      expect(alive!.title).toBe('Alive');
+  it('does not abort on a symlink to a directory named *.md (EISDIR)', async () => {
+    const tmpVault = mkdtempSync(join(tmpdir(), 'kg-dirlink-'));
+    const someDir = mkdtempSync(join(tmpdir(), 'kg-somedir-'));
+    try {
+      writeFileSync(join(tmpVault, 'real.md'), '# Real\ncontent\n', 'utf-8');
+      symlinkSync(someDir, join(tmpVault, 'dir.md'));
 
-      // Gone.md should NOT be in the store (it was skipped before upsertNode).
+      const { nodes } = await parseVault(tmpVault);
+      const ids = nodes.map(n => n.id);
+      expect(ids).toContain('real.md');
+      expect(ids).not.toContain('dir.md');
+    } finally {
+      rmSync(tmpVault, { recursive: true, force: true });
+      rmSync(someDir, { recursive: true, force: true });
+    }
+  });
+
+  it('pipeline.index completes when a file vanishes mid-parse (survivors indexed)', async () => {
+    const store = new Store(':memory:');
+    const pipeline = new IndexPipeline(store, stubEmbedder);
+    const tmpVault = mkdtempSync(join(tmpdir(), 'kg-enoent-pipe-'));
+    try {
+      writeFileSync(join(tmpVault, 'Alive.md'), '# Alive\nsurvives\n', 'utf-8');
+      writeFileSync(join(tmpVault, 'Gone.md'), '# Gone\ndisappears\n', 'utf-8');
+
+      readFileMockTarget = 'Gone.md';
+      await expect(pipeline.index(tmpVault)).resolves.toBeDefined();
+
+      expect(store.getNode('Alive.md')).toBeDefined();
       expect(store.getNode('Gone.md')).toBeUndefined();
     } finally {
-      statMockTarget = null;
+      readFileMockTarget = null;
+      store.close();
       rmSync(tmpVault, { recursive: true, force: true });
     }
   });

@@ -3,6 +3,11 @@ export interface ParsedNode {
   title: string;        // from frontmatter or filename
   content: string;      // full markdown
   frontmatter: Record<string, unknown>;
+  // Content-snapshot mtime, captured by parseVault at the same moment it reads
+  // `content`. Optional so the lighter store.upsertNode / stub-creation call
+  // sites (which never touch sync) need not synthesize one; parseVault — the
+  // sole producer of the nodes IndexPipeline.index consumes — always sets it.
+  mtimeMs?: number;
 }
 
 export interface ParsedEdge {

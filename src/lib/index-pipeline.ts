@@ -1,5 +1,4 @@
-import { stat } from 'fs/promises';
-import { join } from 'path';
+import { resolve } from 'path';
 import { parseVault } from './parser.js';
 import type { Store } from './store.js';
 import { Embedder } from './embedder.js';
@@ -37,6 +36,22 @@ export class IndexPipeline {
       stubNodesCreated: 0,
     };
 
+    // Bind the DB to a single vault. dbPath is derived from dataDir alone, so
+    // two vaults sharing the default KG_DATA_DIR resolve to the SAME kg.db;
+    // indexing the second would treat every path of the first as "deleted" and
+    // silently wipe its index (finding config.ts:35). Record the vault on first
+    // index; refuse any later run against a different one.
+    const resolvedVault = resolve(vaultPath);
+    const boundVault = this.store.getMeta('vault_path');
+    if (boundVault === undefined) {
+      this.store.setMeta('vault_path', resolvedVault);
+    } else if (boundVault !== resolvedVault) {
+      throw new Error(
+        `This database is bound to vault ${boundVault}, refusing to index ${resolvedVault}. ` +
+        `Set a distinct KG_DATA_DIR per vault.`,
+      );
+    }
+
     const { nodes, edges, stubIds } = await parseVault(vaultPath);
     const previousPaths = this.store.getAllSyncPaths();
 
@@ -48,24 +63,25 @@ export class IndexPipeline {
       edgesBySource.set(edge.sourceId, list);
     }
 
-    // Detect deleted files. Capture who linked TO each deleted file BEFORE
-    // deleteNode wipes those edges (it deletes WHERE source OR target) — the
-    // linkers themselves are usually mtime-unchanged and get SKIPPED below,
-    // so without the reconciliation pass further down their freshly-parsed
-    // `source → _stub/<deleted>.md` edges would never be inserted: the link
-    // silently vanished while the orphan stub node was still created. This
-    // is the exact mirror of the stub→real reconciliation below, in the
-    // real→deleted direction.
-    const currentPaths = new Set(nodes.map(n => n.id));
-    const deletedLinkSources = new Set<string>();
-    for (const oldPath of previousPaths) {
-      if (!currentPaths.has(oldPath)) {
-        for (const edge of this.store.getEdgesTo(oldPath)) {
-          deletedLinkSources.add(edge.sourceId);
-        }
-        this.store.deleteNode(oldPath);
-      }
+    // Deletion-detection candidate set: sync paths UNION all real (non-stub)
+    // node ids. A node created via VaultWriter.indexFile (kg_create_node) is
+    // upserted WITHOUT a sync row, so a sync-only candidate set could never
+    // detect its on-disk deletion — it would linger in search/graph forever
+    // (finding index-pipeline.ts:41). Stubs are excluded: they are synthetic
+    // and handled by the stub-reconciliation passes below.
+    const deletionCandidates = new Set(previousPaths);
+    for (const id of this.store.allNodeIds()) {
+      if (!id.startsWith('_stub/')) deletionCandidates.add(id);
     }
+
+    const currentPaths = new Set(nodes.map(n => n.id));
+    // Sources that linked TO a file deleted this run; captured (before their
+    // edges are wiped) so their `source → _stub/<deleted>.md` edges can be
+    // re-inserted even though the source itself is mtime-skipped. The actual
+    // deletion + this reconciliation run together, AFTER the embedding loop,
+    // in one transaction (see below) — see finding index-pipeline.ts:66.
+    const deletedLinkSources = new Set<string>();
+    let nodesDeleted = 0;
 
     // Track which sources got their content re-parsed this run, so we don't
     // double-process them in the stub-resolution pass below.
@@ -73,18 +89,14 @@ export class IndexPipeline {
 
     // Index nodes (incremental)
     for (const node of nodes) {
-      // Guard against ENOENT: a file deleted between parseVault() and the stat
-      // loop (by a sync client, concurrent process, or user) must not abort the
-      // entire index run. Skip the missing file and increment nodesSkipped so
-      // callers can observe the gap; re-throw all other OS errors.
-      let fileStat: Awaited<ReturnType<typeof stat>>;
-      try {
-        fileStat = await stat(join(vaultPath, node.id));
-      } catch (e: any) {
-        if (e.code === 'ENOENT') { stats.nodesSkipped++; continue; }
-        throw e;
-      }
-      const mtime = fileStat.mtimeMs;
+      // Use the content-snapshot mtime parseVault captured at read time (rather
+      // than a fresh stat here, seconds later after other files' embeddings):
+      // the mtime must describe the SAME bytes we are about to store, or a file
+      // edited during the embedding phase gets its post-edit mtime persisted
+      // with pre-edit content and is skipped forever (finding index-pipeline.ts:82).
+      // parseVault always sets mtimeMs and already dropped any file it could not
+      // read, so a missing value here is unreachable.
+      const mtime = node.mtimeMs ?? 0;
       const prevMtime = this.store.getSyncMtime(node.id);
 
       // Skip only when the mtime is UNCHANGED. The previous `prevMtime >= mtime`
@@ -97,25 +109,61 @@ export class IndexPipeline {
         continue;
       }
 
-      this.store.upsertNode(node);
-
-      // Compute and store embedding
+      // Compute the embedding OUTSIDE the transaction (it is async), then commit
+      // ALL of this file's synchronous mutations atomically. Without the wrapper
+      // a reader between deleteAllEdgesFrom and insertEdge (or between the vec
+      // DELETE and INSERT) sees a half-updated node, and a mid-file throw leaves
+      // stale-content/partial-edge state committed (finding index-pipeline.ts:100).
       const tags = Array.isArray(node.frontmatter.tags) ? node.frontmatter.tags : [];
       const text = Embedder.buildEmbeddingText(node.title, tags as string[], node.content);
       const embedding = await this.embedder.embed(text);
-      this.store.upsertEmbedding(node.id, embedding);
 
-      // Re-index edges from this node
-      this.store.deleteAllEdgesFrom(node.id);
-      for (const edge of edgesBySource.get(node.id) ?? []) {
-        this.store.insertEdge(edge);
-        stats.edgesIndexed++;
-      }
-
-      this.store.upsertSync(node.id, mtime);
+      const nodeEdges = edgesBySource.get(node.id) ?? [];
+      this.store.db.transaction(() => {
+        this.store.upsertNode(node);
+        this.store.upsertEmbedding(node.id, embedding);
+        this.store.deleteAllEdgesFrom(node.id);
+        for (const edge of nodeEdges) {
+          this.store.insertEdge(edge);
+        }
+        this.store.upsertSync(node.id, mtime);
+      })();
+      stats.edgesIndexed += nodeEdges.length;
       justIndexed.add(node.id);
       stats.nodesIndexed++;
     }
+
+    // Track edge-only topology changes (they don't bump nodesIndexed /
+    // stubNodesCreated but still mutate the graph → require community rerun).
+    let edgeTopologyChanged = false;
+
+    // Deleted-file handling + linker reconciliation, committed atomically AFTER
+    // the embedding loop. Running the deletion here (not at the top of index())
+    // means a crash DURING the embedding loop leaves the deleted target still in
+    // `sync`, so the next run re-fires deletion detection and can recover; and
+    // wrapping deleteNode together with the compensating `A → _stub/<deleted>.md`
+    // re-insertion in one transaction guarantees the linker edge is never lost
+    // in the window between them (finding index-pipeline.ts:66).
+    this.store.db.transaction(() => {
+      for (const oldPath of deletionCandidates) {
+        if (!currentPaths.has(oldPath)) {
+          for (const edge of this.store.getEdgesTo(oldPath)) {
+            deletedLinkSources.add(edge.sourceId);
+          }
+          this.store.deleteNode(oldPath);
+          nodesDeleted++;
+        }
+      }
+      for (const sourceId of deletedLinkSources) {
+        if (justIndexed.has(sourceId) || !currentPaths.has(sourceId)) continue;
+        this.store.deleteAllEdgesFrom(sourceId);
+        for (const edge of edgesBySource.get(sourceId) ?? []) {
+          this.store.insertEdge(edge);
+          stats.edgesIndexed++;
+        }
+        edgeTopologyChanged = true;
+      }
+    })();
 
     // Reconcile previously-stub targets that now resolve to real files.
     //
@@ -133,27 +181,6 @@ export class IndexPipeline {
       if (id.startsWith('_stub/') && !newStubIds.has(id)) {
         resolvedStubIds.push(id);
       }
-    }
-
-    // Track edge-only topology changes from the stub-resolution pass below
-    // (they don't bump nodesIndexed/stubNodesCreated but still mutate the
-    // graph and therefore require community recomputation).
-    let edgeTopologyChanged = false;
-
-    // Reconcile sources whose link target was deleted this run and that were
-    // NOT re-parsed themselves (mtime unchanged → skipped above): re-insert
-    // their freshly-parsed edges, which now point at the `_stub/` IDs the
-    // stub-creation pass below materializes. Runs before the resolved-stub
-    // pass, so a source fixed here can no longer appear in that pass's
-    // getEdgesTo() lookups (its stale edges are already replaced).
-    for (const sourceId of deletedLinkSources) {
-      if (justIndexed.has(sourceId) || !currentPaths.has(sourceId)) continue;
-      this.store.deleteAllEdgesFrom(sourceId);
-      for (const edge of edgesBySource.get(sourceId) ?? []) {
-        this.store.insertEdge(edge);
-        stats.edgesIndexed++;
-      }
-      edgeTopologyChanged = true;
     }
 
     if (resolvedStubIds.length > 0) {
@@ -185,7 +212,10 @@ export class IndexPipeline {
       if (!this.store.getNode(stubId)) {
         this.store.upsertNode({
           id: stubId,
-          title: stubId.replace('_stub/', '').replace('.md', ''),
+          // Anchor the extension strip: plain .replace('.md','') removes the
+          // FIRST '.md' substring, so `_stub/notes.mdx.md` yielded 'notesx.md'
+          // instead of 'notes.mdx' (finding index-pipeline.ts:188).
+          title: stubId.replace('_stub/', '').replace(/\.md$/, ''),
           content: '',
           frontmatter: { _stub: true },
         });
@@ -201,7 +231,11 @@ export class IndexPipeline {
     if (
       stats.nodesIndexed > 0 ||
       stats.stubNodesCreated > 0 ||
-      edgeTopologyChanged
+      edgeTopologyChanged ||
+      // A deletion-only run (removed note with no inbound links, all others
+      // mtime-skipped) still changes the graph and must refresh communities,
+      // or kg_communities keeps serving the deleted node (finding index-pipeline.ts:201).
+      nodesDeleted > 0
     ) {
       const kg = KnowledgeGraph.fromStore(this.store);
       const communities = kg.detectCommunities(resolution);

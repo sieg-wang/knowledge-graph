@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
-import { mkdtempSync, readFileSync, existsSync, readdirSync, writeFileSync, symlinkSync } from 'fs';
+import { mkdtempSync, readFileSync, existsSync, readdirSync, writeFileSync, symlinkSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { cpSync } from 'fs';
@@ -183,6 +183,28 @@ describe('VaultWriter', () => {
         (n) => !before.includes(n) && n.startsWith('Atomic Concept.md.tmp.'),
       );
       expect(leftover).toEqual([]);
+    });
+
+    // Regression (finding writer.ts:160 / B-1): createNode used to write+rename
+    // the file BEFORE any realpath vault-boundary check (assertPathInVault only
+    // ran inside indexFile, after the file was already on disk). A symlinked
+    // in-vault directory therefore materialized attacker/LLM-controlled content
+    // OUTSIDE the vault before the guard fired. The check must run before write.
+    it('rejects createNode through an in-vault symlinked directory before writing any file', async () => {
+      const outsideDir = mkdtempSync(join(tmpdir(), 'kg-outside-'));
+      try {
+        symlinkSync(outsideDir, join(tempVault, 'escape'));
+        await expect(writer.createNode({
+          title: 'Evil',
+          directory: 'escape',
+          frontmatter: {},
+          content: 'attacker-controlled body',
+        })).rejects.toThrow(/escapes vault/);
+        // The out-of-vault file must NOT have been materialized.
+        expect(existsSync(join(outsideDir, 'Evil.md'))).toBe(false);
+      } finally {
+        rmSync(outsideDir, { recursive: true, force: true });
+      }
     });
 
   });
@@ -419,6 +441,29 @@ describe('VaultWriter', () => {
 
     it('throws if source node file does not exist', async () => {
       await expect(writer.addLink('nonexistent.md', 'target', 'context')).rejects.toThrow(/not found/);
+    });
+
+    // Regression (finding writer.ts:230 / A-5): addLink's stub check only
+    // inspected matches[0], so when a stub node and a REAL note share a title,
+    // DB row order decided the target. The stub is minted first (earlier rowid)
+    // in the normal timeline, so it sorted ahead of a later real note whose
+    // filename stem differs from its title — silently attaching the edge to the
+    // stub. addLink must prefer the first NON-stub match.
+    it('prefers a real node over a same-title stub minted earlier (row-order independence)', async () => {
+      await writer.createNode({ title: 'Source', frontmatter: {}, content: 'x' });
+      // Stub minted FIRST; real note (stem `wt` ≠ title `Widget Theory`) later.
+      store.upsertNode({ id: '_stub/Widget Theory.md', title: 'Widget Theory', content: '', frontmatter: { _stub: true } });
+      store.upsertNode({ id: 'Concepts/wt.md', title: 'Widget Theory', content: 'the real note', frontmatter: {} });
+
+      await writer.addLink('Source.md', 'Widget Theory', 'uses widget theory');
+
+      const edges = store.getEdgesFrom('Source.md');
+      expect(edges.some(e => e.targetId === 'Concepts/wt.md')).toBe(true);
+      expect(edges.some(e => e.targetId.startsWith('_stub/'))).toBe(false);
+      // And the written link is path-qualified so a full reparse re-resolves it
+      // to the same real node.
+      const raw = readFileSync(join(tempVault, 'Source.md'), 'utf-8');
+      expect(raw).toContain('[[Concepts/wt]]');
     });
 
     // Regression (MAJOR-2): a source ID like `../../escape.md` must be rejected

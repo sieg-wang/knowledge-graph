@@ -46,6 +46,19 @@ export class Store {
         indexed_at INTEGER NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS meta (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+
+      -- WARNING (finding store.ts:52): both nodes_fts (external-content fts5)
+      -- and nodes_vec (vec0) are keyed by the IMPLICIT rowid of nodes, whose
+      -- PRIMARY KEY is TEXT. SQLite VACUUM may renumber such rowids WITHOUT
+      -- rewriting the rowids stored inside these shadow tables, silently
+      -- attaching embeddings / FTS rows to the wrong notes. Do NOT run VACUUM on
+      -- kg.db; if you must, follow it with "kg index --force" to rebuild.
+      -- TODO(knowledge-graph-A-10): give nodes an INTEGER PRIMARY KEY and key
+      -- these tables by it (schema migration — out of scope for this pass).
       CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts
         USING fts5(title, content, content='nodes', content_rowid='rowid');
 
@@ -289,6 +302,22 @@ export class Store {
     return new Set(
       this.db.prepare('SELECT path FROM sync').all().map((r: any) => r.path)
     );
+  }
+
+  /** Read a meta value (e.g. the vault this DB is bound to). */
+  getMeta(key: string): string | undefined {
+    const row = this.db.prepare('SELECT value FROM meta WHERE key = ?').get(key) as
+      | { value: string }
+      | undefined;
+    return row?.value;
+  }
+
+  /** Upsert a meta value. */
+  setMeta(key: string, value: string): void {
+    this.db.prepare(`
+      INSERT INTO meta (key, value) VALUES (?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run(key, value);
   }
 
   upsertCommunity(community: { id: number; label: string; summary: string; nodeIds: string[] }): void {

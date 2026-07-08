@@ -490,4 +490,211 @@ describe('IndexPipeline', () => {
       rmSync(tmpVault, { recursive: true, force: true });
     }
   });
+
+  // Regression (finding index-pipeline.ts:188): stub titles were derived with
+  // String.replace('.md', '') which removes the FIRST '.md' substring, not the
+  // extension. A ref like [[notes.mdx]] yields stub id `_stub/notes.mdx.md`
+  // whose title was mangled to 'notesx.md' instead of 'notes.mdx'.
+  it('derives a stub node title by stripping only the trailing .md extension', async () => {
+    const tmpVault = mkdtempSync(join(tmpdir(), 'kg-stub-title-'));
+    const tmpStore = new Store(':memory:');
+    const tmpPipeline = new IndexPipeline(tmpStore, embedder);
+    try {
+      writeFileSync(join(tmpVault, 'note.md'), '# Note\n\nSee [[notes.mdx]] for details.\n');
+      await tmpPipeline.index(tmpVault);
+      const stub = tmpStore.getNode('_stub/notes.mdx.md');
+      expect(stub).toBeDefined();
+      expect(stub!.title).toBe('notes.mdx');
+    } finally {
+      tmpStore.close();
+      rmSync(tmpVault, { recursive: true, force: true });
+    }
+  });
+
+  // Regression (finding index-pipeline.ts:201): a deletion-only run — the
+  // deleted note has NO inbound links and every other file is mtime-skipped —
+  // used to leave communities untouched (the gate only checked
+  // nodesIndexed/stubNodesCreated/edgeTopologyChanged). kg_communities then
+  // served membership still listing the deleted node.
+  it('recomputes communities on a deletion-only run and drops the deleted node', async () => {
+    const tmpVault = mkdtempSync(join(tmpdir(), 'kg-del-community-'));
+    const tmpStore = new Store(':memory:');
+    const tmpPipeline = new IndexPipeline(tmpStore, embedder);
+    try {
+      // X links OUT to Y and Z but nothing links to X (no backlinks).
+      const xPath = join(tmpVault, 'X.md');
+      const yPath = join(tmpVault, 'Y.md');
+      const zPath = join(tmpVault, 'Z.md');
+      writeFileSync(xPath, '# X\n\n[[Y]] and [[Z]]\n');
+      writeFileSync(yPath, '# Y\n\n[[Z]]\n');
+      writeFileSync(zPath, '# Z\n\nleaf\n');
+      const pinned = Math.floor(Date.now() / 1000) - 3600;
+      utimesSync(xPath, pinned, pinned);
+      utimesSync(yPath, pinned, pinned);
+      utimesSync(zPath, pinned, pinned);
+
+      await tmpPipeline.index(tmpVault);
+      expect(tmpStore.getAllCommunities().some(c => c.nodeIds.includes('X.md'))).toBe(true);
+
+      // Delete X only; Y and Z stay pinned so the run is deletion-only.
+      rmSync(xPath);
+      utimesSync(yPath, pinned, pinned);
+      utimesSync(zPath, pinned, pinned);
+
+      const stats = await tmpPipeline.index(tmpVault);
+      expect(stats.nodesIndexed).toBe(0);
+      expect(stats.communitiesDetected).toBeGreaterThan(0);
+      expect(tmpStore.getAllCommunities().some(c => c.nodeIds.includes('X.md'))).toBe(false);
+    } finally {
+      tmpStore.close();
+      rmSync(tmpVault, { recursive: true, force: true });
+    }
+  });
+
+  // Regression (finding index-pipeline.ts:41): deletion detection was driven
+  // solely by the sync table, but VaultWriter.indexFile (kg_create_node) never
+  // writes a sync row. A node created via the writer and then deleted from disk
+  // was absent from BOTH previousPaths and currentPaths, so no run ever removed
+  // it — a ghost surfacing in search forever.
+  it('removes a writer-created node whose file was deleted before the next pipeline run', async () => {
+    const tmpVault = mkdtempSync(join(tmpdir(), 'kg-ghost-'));
+    const tmpStore = new Store(':memory:');
+    const tmpWriter = new VaultWriter(tmpVault, tmpStore, embedder);
+    const tmpPipeline = new IndexPipeline(tmpStore, embedder);
+    try {
+      await tmpWriter.createNode({ title: 'Ghost', frontmatter: {}, content: 'ghostbody uniquetoken' });
+      expect(tmpStore.getNode('Ghost.md')).toBeDefined();
+      // Writer path wrote no sync row.
+      expect([...tmpStore.getAllSyncPaths()]).not.toContain('Ghost.md');
+
+      rmSync(join(tmpVault, 'Ghost.md'));
+      await tmpPipeline.index(tmpVault);
+
+      expect(tmpStore.getNode('Ghost.md')).toBeUndefined();
+      expect(tmpStore.searchFullText('uniquetoken')).toHaveLength(0);
+    } finally {
+      tmpStore.close();
+      rmSync(tmpVault, { recursive: true, force: true });
+    }
+  });
+
+  // Regression (finding index-pipeline.ts:66): the deletion loop deleted the
+  // target node + its linkers' edges at the START of index(), but the
+  // compensating re-insertion of `A → _stub/B.md` edges happened only AFTER the
+  // whole embedding loop, in process memory. A crash mid-run committed the
+  // deletion but lost the reconciliation, and the next run could not recover
+  // (B gone from sync, A mtime-skipped) — the link vanished permanently.
+  it('recovers a linker stub edge after a crash between deletion and reconciliation', async () => {
+    const tmpVault = mkdtempSync(join(tmpdir(), 'kg-crash-'));
+    const tmpStore = new Store(':memory:');
+    const goodPipeline = new IndexPipeline(tmpStore, embedder);
+    const throwingEmbedder = {
+      embed: async () => { throw new Error('simulated crash'); },
+    } as unknown as Embedder;
+    const crashPipeline = new IndexPipeline(tmpStore, throwingEmbedder);
+    try {
+      const aPath = join(tmpVault, 'A.md');
+      writeFileSync(aPath, '# A\n\nSee [[B]].\n');
+      writeFileSync(join(tmpVault, 'B.md'), '# B\n\nB body.\n');
+      const pinned = Math.floor(Date.now() / 1000) - 3600;
+      utimesSync(aPath, pinned, pinned);
+
+      await goodPipeline.index(tmpVault);
+      expect(tmpStore.getEdgesFrom('A.md').some(e => e.targetId === 'B.md')).toBe(true);
+
+      // Delete B, add a NEW file C whose embed throws (mid-run kill), keep A pinned.
+      rmSync(join(tmpVault, 'B.md'));
+      writeFileSync(join(tmpVault, 'C.md'), '# C\n\nnew file.\n');
+      utimesSync(aPath, pinned, pinned);
+
+      await expect(crashPipeline.index(tmpVault)).rejects.toThrow('simulated crash');
+
+      // Re-run with a working embedder — the graph must converge: A's link to
+      // the deleted B survives as a stub edge, not vanish.
+      utimesSync(aPath, pinned, pinned);
+      await goodPipeline.index(tmpVault);
+
+      const edges = tmpStore.getEdgesFrom('A.md');
+      expect(edges.some(e => e.targetId === '_stub/B.md')).toBe(true);
+      expect(edges.some(e => e.targetId === 'B.md')).toBe(false);
+      expect(tmpStore.getNode('_stub/B.md')).toBeDefined();
+    } finally {
+      tmpStore.close();
+      rmSync(tmpVault, { recursive: true, force: true });
+    }
+  });
+
+  // Regression (finding index-pipeline.ts:100): per-file mutations (upsertNode,
+  // upsertEmbedding, deleteAllEdgesFrom, insertEdge×N, upsertSync) ran as
+  // separate autocommit statements. A throw mid-way left a half-updated node
+  // (new content, some edges deleted, others not inserted) visible to readers.
+  // Wrapping them in one transaction makes the per-file update all-or-nothing.
+  it('rolls back the whole per-file update when an edge insert throws mid-way', async () => {
+    const tmpVault = mkdtempSync(join(tmpdir(), 'kg-atomic-file-'));
+    const tmpStore = new Store(':memory:');
+    const tmpPipeline = new IndexPipeline(tmpStore, embedder);
+    try {
+      const nPath = join(tmpVault, 'N.md');
+      writeFileSync(nPath, '# N\n\nv1token. See [[X]].\n');
+      writeFileSync(join(tmpVault, 'X.md'), '# X\n');
+      writeFileSync(join(tmpVault, 'Y.md'), '# Y\n');
+      writeFileSync(join(tmpVault, 'Z.md'), '# Z\n');
+      await tmpPipeline.index(tmpVault);
+      expect(tmpStore.getNode('N.md')!.content).toContain('v1token');
+      expect(tmpStore.getEdgesFrom('N.md').map(e => e.targetId)).toEqual(['X.md']);
+
+      // Change N: new content + two new links; make the 2nd edge insert throw.
+      writeFileSync(nPath, '# N\n\nv2token. See [[Y]] and [[Z]].\n');
+      let nEdgeCalls = 0;
+      const origInsert = tmpStore.insertEdge.bind(tmpStore);
+      tmpStore.insertEdge = (edge: Parameters<typeof origInsert>[0]) => {
+        if (edge.sourceId === 'N.md' && ++nEdgeCalls === 2) {
+          throw new Error('boom on 2nd edge');
+        }
+        return origInsert(edge);
+      };
+      try {
+        await expect(tmpPipeline.index(tmpVault)).rejects.toThrow('boom on 2nd edge');
+      } finally {
+        tmpStore.insertEdge = origInsert;
+      }
+
+      // The entire per-file update must have rolled back to the OLD state.
+      const n = tmpStore.getNode('N.md')!;
+      expect(n.content).toContain('v1token');
+      expect(n.content).not.toContain('v2token');
+      expect(tmpStore.getEdgesFrom('N.md').map(e => e.targetId)).toEqual(['X.md']);
+    } finally {
+      tmpStore.close();
+      rmSync(tmpVault, { recursive: true, force: true });
+    }
+  });
+
+  // Regression (finding config.ts:35): dbPath is derived from dataDir alone, so
+  // two different vaults sharing the default KG_DATA_DIR resolve to the SAME
+  // kg.db. Indexing vault B then treats every path of vault A as deleted and
+  // silently destroys A's index. The DB must record its vault identity and fail
+  // loud on a mismatch.
+  it('refuses to index a second vault into a DB already bound to another vault', async () => {
+    const vaultA = mkdtempSync(join(tmpdir(), 'kg-vaultA-'));
+    const vaultB = mkdtempSync(join(tmpdir(), 'kg-vaultB-'));
+    const sharedStore = new Store(':memory:');
+    const pipe = new IndexPipeline(sharedStore, embedder);
+    try {
+      writeFileSync(join(vaultA, 'a.md'), '# A\n\nalpha\n');
+      writeFileSync(join(vaultB, 'b.md'), '# B\n\nbeta\n');
+
+      await pipe.index(vaultA);
+      expect(sharedStore.getNode('a.md')).toBeDefined();
+
+      await expect(pipe.index(vaultB)).rejects.toThrow(/vault/i);
+      // Vault A's index must be intact; vault B must not have been indexed.
+      expect(sharedStore.getNode('a.md')).toBeDefined();
+      expect(sharedStore.getNode('b.md')).toBeUndefined();
+    } finally {
+      sharedStore.close();
+      rmSync(vaultA, { recursive: true, force: true });
+      rmSync(vaultB, { recursive: true, force: true });
+    }
+  });
 });

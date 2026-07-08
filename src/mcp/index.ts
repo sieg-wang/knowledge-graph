@@ -10,6 +10,7 @@ import { Search } from '../lib/search.js';
 import { requireMatch as requireMatchBase } from '../lib/resolve.js';
 import { VaultWriter } from '../lib/writer.js';
 import { makeEnsureEmbedder } from '../lib/ensure-embedder.js';
+import { makeWriteLock } from '../lib/write-lock.js';
 import { mkdirSync } from 'fs';
 
 // Config, store, and related singletons are initialized in main() so that a
@@ -23,6 +24,12 @@ let search: Search;
 let writer: VaultWriter;
 let cachedGraph: KnowledgeGraph | null = null;
 let ensureEmbedder: ReturnType<typeof makeEnsureEmbedder>;
+
+// Serialize the mutating handlers (kg_index / kg_create_node / kg_annotate_node
+// / kg_add_link). Clients pipeline overlapping tool calls, and these handlers
+// interleave store reads/writes across await points — two overlapping mutations
+// duplicate or drop edges and store stale content (finding mcp/index.ts:47).
+const withWriteLock = makeWriteLock();
 
 function getGraph(): KnowledgeGraph {
   if (!cachedGraph) {
@@ -44,13 +51,13 @@ server.tool(
   'kg_index',
   'Parse vault and build/update the knowledge graph',
   { resolution: z.number().positive().optional().describe('Louvain resolution parameter (default 1.0)') },
-  async ({ resolution }) => {
+  async ({ resolution }) => withWriteLock(async () => {
     await ensureEmbedder();
     const pipeline = new IndexPipeline(store, embedder);
     const stats = await pipeline.index(config.vaultPath, resolution ?? 1.0);
     cachedGraph = null; // Invalidate — graph structure changed
     return { content: [{ type: 'text', text: JSON.stringify(stats, null, 2) }] };
-  }
+  })
 );
 
 server.tool(
@@ -256,7 +263,7 @@ server.tool(
     content: z.string().describe('Markdown content for the node body'),
     frontmatter: z.record(z.string(), z.unknown()).optional().describe('YAML frontmatter fields (type, tags, status, related, etc.)'),
   },
-  async ({ title, directory, content, frontmatter }) => {
+  async ({ title, directory, content, frontmatter }) => withWriteLock(async () => {
     await ensureEmbedder();
     const relPath = await writer.createNode({
       title,
@@ -266,7 +273,7 @@ server.tool(
     });
     cachedGraph = null;
     return { content: [{ type: 'text', text: JSON.stringify({ created: relPath }, null, 2) }] };
-  }
+  })
 );
 
 server.tool(
@@ -276,13 +283,13 @@ server.tool(
     name: z.string().describe('Node name or ID (fuzzy matched)'),
     content: z.string().describe('Markdown content to append'),
   },
-  async ({ name, content }) => {
+  async ({ name, content }) => withWriteLock(async () => {
     const nodeId = requireMatch(name);
     await ensureEmbedder();
     await writer.annotateNode(nodeId, content);
     cachedGraph = null;
     return { content: [{ type: 'text', text: JSON.stringify({ annotated: nodeId }, null, 2) }] };
-  }
+  })
 );
 
 server.tool(
@@ -293,13 +300,13 @@ server.tool(
     target: z.string().describe('Target node reference (e.g., "People/Alice Smith" or "Widget Theory")'),
     context: z.string().describe('Why this link exists — the sentence or note explaining the connection'),
   },
-  async ({ source, target, context }) => {
+  async ({ source, target, context }) => withWriteLock(async () => {
     const sourceId = requireMatch(source);
     await ensureEmbedder();
     await writer.addLink(sourceId, target, context);
     cachedGraph = null;
     return { content: [{ type: 'text', text: JSON.stringify({ linked: { from: sourceId, to: target } }, null, 2) }] };
-  }
+  })
 );
 
 async function main() {
@@ -324,4 +331,14 @@ async function main() {
   await server.connect(transport);
 }
 
-main().catch(console.error);
+// A post-config startup failure (new Store() throwing on a corrupt/locked/
+// directory kg.db, or server.connect() rejecting) must surface as a non-zero
+// exit with a stderr message — not be swallowed by a bare console.error that
+// lets the event loop drain and exit 0, hiding the failure from the MCP client
+// (finding mcp/index.ts:327).
+main().catch((err) => {
+  process.stderr.write(
+    `knowledge-graph MCP: startup error — ${(err as Error)?.stack ?? String(err)}\n`,
+  );
+  process.exit(1);
+});

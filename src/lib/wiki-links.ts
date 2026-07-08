@@ -4,14 +4,23 @@ export interface RawLink {
 }
 
 /**
+ * Strip fenced (```…```) and inline (`…`) code spans from markdown so that
+ * `#`-prefixed tokens and `[[…]]` sequences inside code are not mistaken for
+ * inline tags or wiki links. Exported so parser.extractInlineTags reuses the
+ * exact same rule the wiki-link extractor relies on.
+ */
+export function stripCode(markdown: string): string {
+  return markdown.replace(/```[\s\S]*?```/g, '').replace(/`[^`]+`/g, '');
+}
+
+/**
  * Extract wiki links from markdown, ignoring code blocks and embedded images.
  */
 export function extractWikiLinks(markdown: string): RawLink[] {
   const links: RawLink[] = [];
 
   // Remove code blocks first
-  const withoutCode = markdown.replace(/```[\s\S]*?```/g, '')
-    .replace(/`[^`]+`/g, '');
+  const withoutCode = stripCode(markdown);
 
   // Match [[...]] but not ![[...]]
   const pattern = /(?<!!)\[\[([^\]]+)\]\]/g;

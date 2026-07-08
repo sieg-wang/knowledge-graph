@@ -1,10 +1,11 @@
-import { readdir, readFile } from 'fs/promises';
+import { readdir, readFile, stat } from 'fs/promises';
 import { join, basename } from 'path';
 import matter from 'gray-matter';
 import {
   extractWikiLinks,
   buildStemLookup,
   resolveLink,
+  stripCode,
 } from './wiki-links.js';
 import type { ParsedNode, ParsedEdge } from './types.js';
 
@@ -26,7 +27,29 @@ export async function parseVault(vaultPath: string): Promise<ParseResult> {
 
   for (const relPath of mdPaths) {
     const absPath = join(vaultPath, relPath);
-    const raw = await readFile(absPath, 'utf-8');
+
+    // Capture the mtime at the SAME point we read the content, then carry it on
+    // the node (index-pipeline uses it as the content-snapshot mtime instead of
+    // a later stat — closes the TOCTOU where a file edited during the embedding
+    // phase got its post-edit mtime stored with pre-edit content, finding
+    // index-pipeline.ts:82). Both syscalls are guarded: a regular file deleted
+    // between readdir and here (ENOENT), or a leftover odd entry (EISDIR/ELOOP),
+    // must skip that one file — NOT abort the whole index run (finding
+    // parser.ts:29). collectMarkdownFiles already excludes symlinks, so this
+    // guard is the second line of defence for the plain readdir→read race.
+    let raw: string;
+    let mtimeMs: number;
+    try {
+      mtimeMs = (await stat(absPath)).mtimeMs;
+      raw = await readFile(absPath, 'utf-8');
+    } catch (e: unknown) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'EISDIR' || code === 'ELOOP') {
+        console.warn(`Skipping ${relPath}: ${code}`);
+        continue;
+      }
+      throw e;
+    }
 
     let fm: Record<string, unknown>;
     let content: string;
@@ -56,13 +79,15 @@ export async function parseVault(vaultPath: string): Promise<ParseResult> {
       ? fm.title
       : basename(relPath, '.md');
 
-    const inlineTags = extractInlineTags(content);
+    // Strip code spans before tag extraction so `#include`, CSS `#ff0000`,
+    // etc. inside fenced/inline code do not mint phantom tags (parser.ts:59).
+    const inlineTags = extractInlineTags(stripCode(content));
     const frontmatter = { ...fm };
     if (inlineTags.length > 0) {
       frontmatter.inline_tags = inlineTags;
     }
 
-    nodes.push({ id: relPath, title, content, frontmatter });
+    nodes.push({ id: relPath, title, content, frontmatter, mtimeMs });
 
     const links = extractWikiLinks(content);
     const paragraphs = content.split(/\n\n+/);
@@ -154,6 +179,12 @@ async function collectMarkdownFiles(
 
   for (const entry of entries) {
     if (entry.name.startsWith('.')) continue;
+    // Skip ALL symlinks. A symlink named `*.md` can point outside the vault
+    // (readFile would index a secret file's bytes — the read-path mirror of the
+    // write-path vault-boundary guard), dangle (ENOENT), or target a directory
+    // (EISDIR abort). The vault's own notes are regular files; anything reached
+    // only via a symlink is out of scope for indexing (finding parser.ts:162).
+    if (entry.isSymbolicLink()) continue;
     if (entry.isDirectory() && EXCLUDED_DIRS.has(entry.name)) continue;
 
     const relPath = subdir ? `${subdir}/${entry.name}` : entry.name;

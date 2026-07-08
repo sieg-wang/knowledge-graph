@@ -4,7 +4,7 @@ import {
   readFileSync,
   writeFileSync,
   appendFileSync,
-  renameSync,
+  linkSync,
   unlinkSync,
   realpathSync,
 } from 'fs';
@@ -141,6 +141,15 @@ export class VaultWriter {
     const relPath = opts.directory ? `${opts.directory}/${filename}` : filename;
     const absPath = join(dir, filename);
 
+    // Vault-boundary check BEFORE any write. assertSafeDirectory above is
+    // lexical only (blocks '..'/absolute/reserved chars, NOT symlinks); an
+    // in-vault symlinked directory would otherwise let writeFileSync+renameSync
+    // materialize attacker/LLM-controlled content OUTSIDE the vault, only for
+    // indexFile's guard to fire AFTER the file already exists on disk (finding
+    // writer.ts:160). The dir now exists (mkdirSync ran), so the realpathSync
+    // fallback resolves the symlink and throws before we touch the filesystem.
+    assertPathInVault(absPath, this.vaultPath, relPath);
+
     if (existsSync(absPath)) {
       throw new Error(`File already exists: ${relPath}`);
     }
@@ -148,19 +157,24 @@ export class VaultWriter {
     const fm = { title: opts.title, ...opts.frontmatter };
     const fileContent = matter.stringify(opts.content, fm);
 
-    // Atomic publish: write to a sibling tmp path, then rename. A crash
-    // mid-write leaves the tmp file behind — the path is PID+timestamp-
-    // qualified so it is never referenced again and accumulates silently as
-    // vault clutter (non-.md files are ignored by collectMarkdownFiles, so
-    // indexing is unaffected). The existsSync(absPath) guard above prevents
-    // re-creation of the final .md if a previous rename succeeded on a retry;
-    // it does NOT scan for or unlink stale *.md.tmp.* files from prior runs.
+    // Atomic AND exclusive publish: write to a sibling tmp path, then linkSync
+    // it into place. Unlike renameSync (which silently REPLACES an existing
+    // destination), link(2) fails EEXIST if the final path appeared between the
+    // existsSync check above and here — closing the check-then-act race where a
+    // concurrent writer's note would be clobbered without error (finding
+    // writer.ts:144). We then unlink the tmp name; a crash between link and
+    // unlink leaves the tmp hard-link as harmless clutter (non-.md, ignored by
+    // collectMarkdownFiles) while absPath is already the complete, durable file.
     const tmpPath = `${absPath}.tmp.${process.pid}.${Date.now()}`;
     try {
       writeFileSync(tmpPath, fileContent, 'utf-8');
-      renameSync(tmpPath, absPath);
+      linkSync(tmpPath, absPath);
+      unlinkSync(tmpPath);
     } catch (err) {
       try { unlinkSync(tmpPath); } catch { /* tmp may not exist */ }
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+        throw new Error(`File already exists: ${relPath}`);
+      }
       throw err;
     }
 
@@ -227,10 +241,13 @@ export class VaultWriter {
     // same not-yet-created topic (finding writer.ts:218). Routing stub matches
     // through the else branch mints the parser-shaped `_stub/<ref>.md` id
     // (idempotent with the first call) and keeps the link text readable.
-    const resolved =
-      matches.length > 0 && !matches[0].nodeId.startsWith('_stub/')
-        ? matches[0]
-        : null;
+    // Prefer the first NON-stub match rather than only inspecting matches[0].
+    // resolveNodeName's exact-title pass returns ALL same-title rows in rowid
+    // order with no stub de-prioritization, so a stub minted before a later
+    // real note (the normal timeline) sorted first and silently captured the
+    // edge. Falling back to null only when NO real node matches preserves the
+    // pinned first-match behavior for all-real ambiguity (finding writer.ts:230).
+    const resolved = matches.find(m => !m.nodeId.startsWith('_stub/')) ?? null;
     if (resolved) {
       targetId = resolved.nodeId;
       // resolveNodeName matches by id/title/alias/substring, but a subsequent

@@ -161,6 +161,35 @@ describe('parseVault', () => {
     }
   });
 
+  // Regression (finding parser.ts:59): extractInlineTags ran on the RAW note
+  // content, while extractWikiLinks deliberately strips fenced/inline code
+  // first. The tag pattern matched inside code fences, so a ```c block with
+  // `#include <stdio.h>` minted a phantom `include` tag (and CSS `#ff0000`
+  // minted `ff0000`). Code must be stripped before tag extraction, mirroring
+  // the wiki-link path.
+  it('does not extract inline tags from inside code fences', async () => {
+    const tmpVault = mkdtempSync(join(tmpdir(), 'kg-parser-codetags-'));
+    try {
+      writeFileSync(
+        join(tmpVault, 'code.md'),
+        'Intro with a real #project tag.\n\n' +
+          '```c\n#include <stdio.h>\nint main(){ return 0; }\n```\n\n' +
+          'Inline `#ff0000` color and `#notatag` here.\n',
+        'utf-8',
+      );
+      const { nodes } = await parseVault(tmpVault);
+      const tags = nodes.find(n => n.id === 'code.md')!.frontmatter.inline_tags as string[];
+      // Only the real tag outside code survives.
+      expect(tags).toEqual(['project']);
+      // Explicitly: the code-block false positives must be absent.
+      expect(tags).not.toContain('include');
+      expect(tags).not.toContain('ff0000');
+      expect(tags).not.toContain('notatag');
+    } finally {
+      rmSync(tmpVault, { recursive: true, force: true });
+    }
+  });
+
   // Regression: YAML frontmatter is user-authored. A payload like
   // `__proto__: { polluted: true }` would flow through Store.upsertNode and
   // downstream object-spread sites, mutating Object.prototype for the whole

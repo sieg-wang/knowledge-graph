@@ -324,6 +324,15 @@ function findAllSimplePaths(
   // maxDepth≥3, DFS can enumerate millions of paths before the depth cut-off
   // fires, OOMing the MCP process. Abort the recursion as soon as the cap is
   // hit so we return a bounded, useful answer instead of crashing.
+  //
+  // Step budget: the maxPaths cap only advances when a path REACHES the target,
+  // so for an UNREACHABLE target it never fires and the DFS enumerates every
+  // simple path of the component (factorial in a dense cluster) — synchronously
+  // wedging the single-threaded MCP server. Cap total recursion steps so the
+  // search aborts with whatever it has found (finding graph.ts:334).
+  const MAX_STEPS = 200_000;
+  let steps = 0;
+
   function dfs(
     current: string,
     target: string,
@@ -331,6 +340,7 @@ function findAllSimplePaths(
     visited: Set<string>,
     depth: number,
   ): boolean {
+    if (++steps > MAX_STEPS) return true;
     if (results.length >= maxPaths) return true;
     if (current === target) {
       results.push([...path]);

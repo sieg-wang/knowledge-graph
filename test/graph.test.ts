@@ -255,4 +255,35 @@ describe('KnowledgeGraph', () => {
     expect(paths.length).toBeGreaterThan(0);
     denseStore.close();
   });
+
+  // Regression (finding graph.ts:334): the maxPaths cap only advances when a
+  // path REACHES the target, so for an UNREACHABLE target it never fires — the
+  // DFS enumerates every simple path of the source's component (factorial in a
+  // dense cluster) before returning [], synchronously wedging the single-
+  // threaded MCP server. A step budget must bound the work and return promptly.
+  it('findPaths returns promptly (bounded work) for an unreachable target in a dense component', () => {
+    const dense = new Store(':memory:');
+    const N = 12;
+    for (let i = 0; i < N; i++) {
+      dense.upsertNode({ id: `n${i}.md`, title: `N${i}`, content: '', frontmatter: {} });
+    }
+    // Complete graph on the N nodes.
+    for (let i = 0; i < N; i++) {
+      for (let j = i + 1; j < N; j++) {
+        dense.insertEdge({ sourceId: `n${i}.md`, targetId: `n${j}.md`, context: '' });
+      }
+    }
+    // Isolated target — unreachable from the clique.
+    dense.upsertNode({ id: 'end.md', title: 'End', content: '', frontmatter: {} });
+    const denseKg = KnowledgeGraph.fromStore(dense);
+
+    const t0 = Date.now();
+    const paths = denseKg.findPaths('n0.md', 'end.md', 11);
+    const elapsed = Date.now() - t0;
+
+    expect(paths).toEqual([]);
+    // Without the budget this takes many seconds (factorial enumeration).
+    expect(elapsed).toBeLessThan(1500);
+    dense.close();
+  });
 });
