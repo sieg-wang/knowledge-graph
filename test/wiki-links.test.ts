@@ -111,4 +111,24 @@ describe('resolveLink', () => {
     const result = resolveLink('People/Alice Smith', lookup, new Set(paths));
     expect(result).toBe('People/Alice Smith.md');
   });
+
+  // Regression (finding wiki-links.ts:68): [[Note#Heading]] / [[Note#^blockid]]
+  // address a location WITHIN the target note, not a separate file. The '#...'
+  // subpath must be stripped before resolution — otherwise an existing note is
+  // misclassified as unresolvable and the parser mints a phantom stub.
+  it('strips a heading anchor and resolves to the real note', () => {
+    const lookup = buildStemLookup(['Target.md']);
+    expect(resolveLink('Target#Overview', lookup)).toBe('Target.md');
+  });
+
+  it('strips a block-reference anchor and resolves to the real note', () => {
+    const lookup = buildStemLookup(['Target.md']);
+    expect(resolveLink('Target#^abc123', lookup)).toBe('Target.md');
+  });
+
+  it('strips the anchor from a path-qualified link too', () => {
+    const lookup = buildStemLookup(['Concepts/Widget Theory.md']);
+    expect(resolveLink('Concepts/Widget Theory#Details', lookup))
+      .toBe('Concepts/Widget Theory.md');
+  });
 });

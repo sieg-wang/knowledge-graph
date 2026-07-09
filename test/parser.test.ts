@@ -121,6 +121,67 @@ describe('parseVault', () => {
     expect(truncateCodepoints('hi', 10)).toBe('hi');
   });
 
+  // Regression (finding wiki-links.ts:68): [[Note#Heading]] to an EXISTING note
+  // must produce an edge to that note, not a phantom _stub/Note#Heading.md.
+  it('resolves anchored links to the real note instead of minting a stub', async () => {
+    const tmpVault = mkdtempSync(join(tmpdir(), 'kg-parser-anchor-'));
+    try {
+      writeFileSync(join(tmpVault, 'Target.md'), '# Target\n\n# Overview\n\nbody\n', 'utf-8');
+      writeFileSync(
+        join(tmpVault, 'Src.md'),
+        'See [[Target#Overview]] and [[Target#Overview|the overview]].\n',
+        'utf-8',
+      );
+      const { edges, stubIds } = await parseVault(tmpVault);
+      const srcEdges = edges.filter(e => e.sourceId === 'Src.md');
+      expect(srcEdges.length).toBe(2);
+      expect(srcEdges.every(e => e.targetId === 'Target.md')).toBe(true);
+      // No phantom stub carrying the anchor text.
+      expect([...stubIds].some(id => id.includes('#'))).toBe(false);
+    } finally {
+      rmSync(tmpVault, { recursive: true, force: true });
+    }
+  });
+
+  // Regression (finding wiki-links.ts:68): an UNRESOLVABLE anchored link must
+  // mint its stub from the file part, not the full raw text with the anchor.
+  it('mints an unresolved anchored stub from the file part only', async () => {
+    const tmpVault = mkdtempSync(join(tmpdir(), 'kg-parser-anchor-stub-'));
+    try {
+      writeFileSync(join(tmpVault, 'Src.md'), 'See [[Missing#Section]].\n', 'utf-8');
+      const { stubIds } = await parseVault(tmpVault);
+      expect(stubIds.has('_stub/Missing.md')).toBe(true);
+      expect(stubIds.has('_stub/Missing#Section.md')).toBe(false);
+    } finally {
+      rmSync(tmpVault, { recursive: true, force: true });
+    }
+  });
+
+  // Regression (finding parser.ts:103): the edge-context paragraph lookup
+  // matched on the OPEN prefix `[[raw`, so a link whose name is a prefix of
+  // another linked note's name (e.g. [[Foo]] vs [[Foobar]]) captured the wrong
+  // paragraph as context. The match must close against the link's terminators.
+  it('stores the paragraph containing the actual link, not a prefix collision', async () => {
+    const tmpVault = mkdtempSync(join(tmpdir(), 'kg-parser-prefix-'));
+    try {
+      writeFileSync(join(tmpVault, 'Foo.md'), '# Foo\n', 'utf-8');
+      writeFileSync(join(tmpVault, 'Foobar.md'), '# Foobar\n', 'utf-8');
+      writeFileSync(
+        join(tmpVault, 'Note.md'),
+        'Discussion of [[Foobar]] in the first paragraph.\n\n' +
+          'The real link to [[Foo]] appears only here in the second paragraph.\n',
+        'utf-8',
+      );
+      const { edges } = await parseVault(tmpVault);
+      const fooEdge = edges.find(e => e.sourceId === 'Note.md' && e.targetId === 'Foo.md')!;
+      expect(fooEdge).toBeDefined();
+      expect(fooEdge.context).toContain('second paragraph');
+      expect(fooEdge.context).not.toContain('Foobar');
+    } finally {
+      rmSync(tmpVault, { recursive: true, force: true });
+    }
+  });
+
   it('handles malformed frontmatter gracefully', async () => {
     const { nodes } = await parseVault(FIXTURE_VAULT);
     const bad = nodes.find(n => n.id === 'bad-frontmatter.md')!;

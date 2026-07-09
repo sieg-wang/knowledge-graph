@@ -9,7 +9,10 @@ import {
 } from './wiki-links.js';
 import type { ParsedNode, ParsedEdge } from './types.js';
 
-const EXCLUDED_DIRS = new Set(['.obsidian', '_FileOrganizer2000', 'attachments']);
+// Exported so writer.ts rejects createNode targets the indexer would skip: a
+// node written into an excluded/dot-prefixed path is invisible to parseVault and
+// gets deleted on the next index (finding writer.ts:62).
+export const EXCLUDED_DIRS = new Set(['.obsidian', '_FileOrganizer2000', 'attachments']);
 
 export interface ParseResult {
   nodes: ParsedNode[];
@@ -94,13 +97,26 @@ export async function parseVault(vaultPath: string): Promise<ParseResult> {
 
     for (const link of links) {
       const targetId = resolveLink(link.raw, stemLookup, allPathsSet);
-      const resolvedTarget = targetId ?? `_stub/${link.raw}.md`;
+      // Mint the stub from the file part only (drop any `#heading`/`#^block`
+      // anchor), so an unresolvable [[Missing#Section]] yields `_stub/Missing.md`
+      // — the same id every distinct anchor to Missing shares — not one phantom
+      // stub per anchor (finding wiki-links.ts:68). Keeps resolveLink's own
+      // anchor-stripping in sync on the stub-creation path.
+      const resolvedTarget = targetId ?? `_stub/${link.raw.split('#')[0]}.md`;
 
       if (!targetId) {
         stubIds.add(resolvedTarget);
       }
 
-      const contextRaw = paragraphs.find(p => p.includes(`[[${link.raw}`))
+      // Close the match against the link's own terminators (`]]` for a bare
+      // link, `|` for a pipe alias). Matching the OPEN prefix `[[${raw}` let a
+      // link whose name is a prefix of another linked note's name (e.g. [[Foo]]
+      // when the note also links [[Foobar]]) capture the longer link's
+      // paragraph as its context. raw already carries any `#anchor` text, so
+      // `]]` and `|` are the only valid terminators (finding parser.ts:103).
+      const contextRaw = paragraphs.find(
+        p => p.includes(`[[${link.raw}]]`) || p.includes(`[[${link.raw}|`),
+      )
         ?? paragraphs.find(p => p.includes(link.display ?? link.raw))
         ?? '';
       // Cap context at 500 chars. Without this, a note with no blank lines

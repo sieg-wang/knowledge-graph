@@ -207,6 +207,72 @@ describe('VaultWriter', () => {
       }
     });
 
+    // Regression (finding writer.ts:62): createNode accepted directories/titles
+    // that parseVault deliberately skips — EXCLUDED_DIRS (e.g. `attachments`),
+    // dot-prefixed directory segments, and dot-prefixed titles. The node was
+    // written + indexed and looked stored, but the very next kg_index treated the
+    // (parser-invisible) live node as a deleted file and silently deleteNode()'d
+    // it. createNode must reject such parser-invisible paths up front.
+    it('rejects an excluded directory (attachments) the indexer would skip', async () => {
+      await expect(writer.createNode({
+        title: 'Meeting Notes',
+        directory: 'attachments',
+        frontmatter: {},
+        content: 'x',
+      })).rejects.toThrow(/Unsafe directory/);
+      expect(existsSync(join(tempVault, 'attachments', 'Meeting Notes.md'))).toBe(false);
+    });
+
+    it('rejects a dot-prefixed directory segment the indexer would skip', async () => {
+      await expect(writer.createNode({
+        title: 'Secret Plan',
+        directory: '.agent-notes',
+        frontmatter: {},
+        content: 'x',
+      })).rejects.toThrow(/Unsafe directory/);
+    });
+
+    it('rejects an excluded segment nested deeper in the directory path', async () => {
+      await expect(writer.createNode({
+        title: 'Note',
+        directory: 'Projects/attachments',
+        frontmatter: {},
+        content: 'x',
+      })).rejects.toThrow(/Unsafe directory/);
+    });
+
+    it('rejects a dot-prefixed title the indexer would skip', async () => {
+      await expect(writer.createNode({
+        title: '.hidden-title',
+        frontmatter: {},
+        content: 'x',
+      })).rejects.toThrow(/Unsafe title/);
+    });
+
+    // Regression (finding writer.ts:138): mkdirSync ran BEFORE the vault-boundary
+    // check, so a directory like `linked/deep/nested` where `linked` is an
+    // in-vault symlink to an external dir made mkdirSync(recursive) follow the
+    // symlink and create attacker/LLM-chosen directory trees OUTSIDE the vault
+    // before assertPathInVault fired. The boundary check must run before mkdir.
+    it('rejects createNode through a symlinked ancestor WITHOUT creating any external dir tree', async () => {
+      const outsideDir = mkdtempSync(join(tmpdir(), 'kg-outside-mkdir-'));
+      try {
+        symlinkSync(outsideDir, join(tempVault, 'linked'));
+        await expect(writer.createNode({
+          title: 'Evil',
+          directory: 'linked/deep/nested',
+          frontmatter: {},
+          content: 'attacker-controlled body',
+        })).rejects.toThrow(/escapes vault/);
+        // No external directory tree may have been materialized.
+        expect(existsSync(join(outsideDir, 'deep'))).toBe(false);
+        expect(existsSync(join(outsideDir, 'deep', 'nested'))).toBe(false);
+        expect(existsSync(join(outsideDir, 'deep', 'nested', 'Evil.md'))).toBe(false);
+      } finally {
+        rmSync(outsideDir, { recursive: true, force: true });
+      }
+    });
+
   });
 
   describe('annotateNode', () => {

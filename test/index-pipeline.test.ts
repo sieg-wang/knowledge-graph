@@ -697,4 +697,125 @@ describe('IndexPipeline', () => {
       rmSync(vaultB, { recursive: true, force: true });
     }
   });
+
+  // Regression (finding index-pipeline.ts:148): an existing-but-empty vault
+  // directory (a stale/unmounted mountpoint, a failed cloud sync) makes parseVault
+  // return 0 files, and the deletion pass then wiped the ENTIRE derived store with
+  // no warning. index() must refuse to wipe a populated store when the vault
+  // parses to zero files.
+  it('refuses to wipe a populated store when the vault parses to zero files', async () => {
+    const tmpVault = mkdtempSync(join(tmpdir(), 'kg-empty-vault-'));
+    const tmpStore = new Store(':memory:');
+    const tmpPipeline = new IndexPipeline(tmpStore, embedder);
+    try {
+      writeFileSync(join(tmpVault, 'A.md'), '# A\n\nSee [[B]].\n');
+      writeFileSync(join(tmpVault, 'B.md'), '# B\n\nbody.\n');
+      await tmpPipeline.index(tmpVault);
+      const nonStub = () => tmpStore.allNodeIds().filter(id => !id.startsWith('_stub/'));
+      expect(nonStub().length).toBe(2);
+
+      // Simulate the vault directory going empty (unmount / failed sync) while
+      // the directory itself still exists.
+      rmSync(join(tmpVault, 'A.md'));
+      rmSync(join(tmpVault, 'B.md'));
+
+      await expect(tmpPipeline.index(tmpVault)).rejects.toThrow(/refusing to wipe/i);
+      // The store must be intact — nothing was deleted.
+      expect(nonStub().length).toBe(2);
+
+      // The explicit escape hatch still allows a genuine full-empty.
+      const stats = await tmpPipeline.index(tmpVault, 1.0, false, true);
+      expect(stats.nodesIndexed).toBe(0);
+      expect(nonStub().length).toBe(0);
+    } finally {
+      tmpStore.close();
+      rmSync(tmpVault, { recursive: true, force: true });
+    }
+  });
+
+  // Regression (finding index-pipeline.ts:196): the stub-resolution reconcile
+  // pass (deleteAllEdgesFrom + re-insert) ran as bare autocommit statements in a
+  // WAL database. A throw (or crash) between the DELETE and the INSERT committed
+  // the DELETE alone, and no later run self-heals — the stub is gone, so the
+  // source is never reconciled again and its edges are permanently lost.
+  // Wrapping the pass in one transaction makes it all-or-nothing.
+  it('rolls back the stub-resolution reconcile when an edge insert throws', async () => {
+    const tmpVault = mkdtempSync(join(tmpdir(), 'kg-reconcile-atomic-'));
+    const tmpStore = new Store(':memory:');
+    const tmpPipeline = new IndexPipeline(tmpStore, embedder);
+    try {
+      // Run 1: A links [[B]], B absent → stub edge A → _stub/B.md. Pin A's mtime
+      // so run 2 skips the per-file loop and the RECONCILE pass handles A.
+      const aPath = join(tmpVault, 'A.md');
+      writeFileSync(aPath, '# A\n\nSee [[B]] for details.\n');
+      const pinned = Math.floor(Date.now() / 1000) - 3600;
+      utimesSync(aPath, pinned, pinned);
+      await tmpPipeline.index(tmpVault);
+      expect(tmpStore.getEdgesFrom('A.md').map(e => e.targetId)).toEqual(['_stub/B.md']);
+
+      // Run 2: create B.md so _stub/B.md resolves; make the reconcile INSERT throw
+      // (stands in for SQLITE_FULL/SQLITE_BUSY/SIGKILL between DELETE and INSERT).
+      writeFileSync(join(tmpVault, 'B.md'), '# B\n\nB content.\n');
+      utimesSync(aPath, pinned, pinned);
+      const origInsert = tmpStore.insertEdge.bind(tmpStore);
+      tmpStore.insertEdge = (edge: Parameters<typeof origInsert>[0]) => {
+        if (edge.sourceId === 'A.md') throw new Error('boom on reconcile insert');
+        return origInsert(edge);
+      };
+      try {
+        await expect(tmpPipeline.index(tmpVault)).rejects.toThrow('boom on reconcile insert');
+      } finally {
+        tmpStore.insertEdge = origInsert;
+      }
+
+      // A's edge must NOT be lost: the reconcile rolled back to the pre-run stub
+      // edge rather than committing the bare DELETE and leaving A edgeless.
+      expect(tmpStore.getEdgesFrom('A.md').map(e => e.targetId)).toEqual(['_stub/B.md']);
+
+      // A clean re-run then converges: A links the real B.md, the stub is gone.
+      utimesSync(aPath, pinned, pinned);
+      await tmpPipeline.index(tmpVault);
+      const finalTargets = tmpStore.getEdgesFrom('A.md').map(e => e.targetId);
+      expect(finalTargets).toEqual(['B.md']);
+      expect(tmpStore.getNode('_stub/B.md')).toBeUndefined();
+    } finally {
+      tmpStore.close();
+      rmSync(tmpVault, { recursive: true, force: true });
+    }
+  });
+
+  // Regression (finding index-pipeline.ts:181): a real vault directory literally
+  // named `_stub/` is not in EXCLUDED_DIRS, so notes under it are collected with
+  // ids like `_stub/Archived Idea.md`. The resolved-stub pass misclassified those
+  // REAL nodes (absent from this run's freshly-minted stubIds) as resolved stubs
+  // and deleteNode()'d them every run — silently invisible, with recurring wasted
+  // re-embedding. A `_stub/` id that is present in the current parse must be left
+  // alone.
+  it('does not delete real files that live under a literal _stub/ directory', async () => {
+    const tmpVault = mkdtempSync(join(tmpdir(), 'kg-real-stub-dir-'));
+    const tmpStore = new Store(':memory:');
+    const tmpPipeline = new IndexPipeline(tmpStore, embedder);
+    try {
+      mkdirSync(join(tmpVault, '_stub'));
+      writeFileSync(join(tmpVault, '_stub', 'Archived Idea.md'), '# Archived Idea\n\nold plan.\n');
+      writeFileSync(join(tmpVault, 'Root.md'), '# Root\n\nSee [[Archived Idea]].\n');
+
+      const first = await tmpPipeline.index(tmpVault);
+      expect(first.nodesIndexed).toBe(2);
+      // The real note survives run 1 and keeps its inbound edge.
+      expect(tmpStore.allNodeIds()).toContain('_stub/Archived Idea.md');
+      expect(
+        tmpStore.getEdgesFrom('Root.md').some(e => e.targetId === '_stub/Archived Idea.md'),
+      ).toBe(true);
+
+      // Run 2: both files are mtime-skipped and the note must STILL be present
+      // (previously it was re-indexed then deleted on every run).
+      const second = await tmpPipeline.index(tmpVault);
+      expect(tmpStore.allNodeIds()).toContain('_stub/Archived Idea.md');
+      expect(second.nodesSkipped).toBe(2);
+    } finally {
+      tmpStore.close();
+      rmSync(tmpVault, { recursive: true, force: true });
+    }
+  });
 });

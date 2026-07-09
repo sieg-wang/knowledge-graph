@@ -14,7 +14,7 @@ import type { Store } from './store.js';
 import { Embedder } from './embedder.js';
 import { resolveNodeName } from './resolve.js';
 import { buildStemLookup, resolveLink } from './wiki-links.js';
-import { sanitizeFrontmatter } from './parser.js';
+import { sanitizeFrontmatter, EXCLUDED_DIRS } from './parser.js';
 
 export interface CreateNodeOptions {
   title: string;
@@ -57,6 +57,15 @@ function assertSafeTitle(title: string): void {
   if (title === '.' || title === '..') {
     throw new Error(`Unsafe title: "${title}" is a filesystem reference`);
   }
+  // The filename is `${title}.md`; collectMarkdownFiles skips any entry whose
+  // name starts with '.', so a dot-prefixed title is parser-invisible and the
+  // node would be deleted on the next index (finding writer.ts:62).
+  if (title.startsWith('.')) {
+    throw new Error(
+      `Unsafe title: ${JSON.stringify(title)} — leading-dot files are skipped by the indexer ` +
+      `and the node would be deleted on the next index`,
+    );
+  }
 }
 
 function assertSafeDirectory(directory: string | undefined): void {
@@ -73,6 +82,16 @@ function assertSafeDirectory(directory: string | undefined): void {
     }
     if (INVALID_TITLE_CHARS.test(seg)) {
       throw new Error(`Unsafe directory segment: ${JSON.stringify(seg)}`);
+    }
+    // collectMarkdownFiles skips dot-prefixed and EXCLUDED_DIRS directories, so
+    // a node written under one is parser-invisible and gets deleted on the next
+    // index. Reject those segments here rather than silently creating a doomed
+    // node (finding writer.ts:62).
+    if (seg.startsWith('.') || EXCLUDED_DIRS.has(seg)) {
+      throw new Error(
+        `Unsafe directory segment ${JSON.stringify(seg)}: the indexer skips dot-prefixed and ` +
+        `excluded directories (${[...EXCLUDED_DIRS].join(', ')}), so the node would be deleted on the next index`,
+      );
     }
   }
 }
@@ -115,6 +134,43 @@ function assertPathInVault(absPath: string, vaultPath: string, nodeId: string): 
   }
 }
 
+/**
+ * Throws if creating directory `dir` (via mkdirSync recursive) would escape the
+ * vault through a symlinked ancestor. Canonicalizes the DEEPEST EXISTING
+ * ancestor of `dir` — mkdirSync(recursive) follows an existing in-vault symlink
+ * (e.g. `linked` -> /outside) and would materialize the remaining segments
+ * OUTSIDE the vault. assertPathInVault run afterwards only fires AFTER those
+ * external directories already exist (finding writer.ts:138), so this check must
+ * run BEFORE mkdirSync. New (not-yet-existing) leaf segments cannot be symlinks,
+ * so canonicalizing the existing prefix is sufficient.
+ */
+function assertDirCreationInVault(dir: string, vaultPath: string, nodeId: string): void {
+  const realVault = realpathSync(vaultPath);
+  // Canonicalize the deepest EXISTING ancestor of `dir`. realpathSync throws
+  // ENOENT for a not-yet-existing path, so walk up until it resolves — this
+  // follows any symlink in the existing prefix. We probe with realpathSync
+  // (not existsSync) so a global fs.existsSync mock — used elsewhere in the
+  // test suite to drive the createNode race — cannot perturb the walk.
+  let ancestor = dir;
+  let realAncestor: string;
+  for (;;) {
+    try {
+      realAncestor = realpathSync(ancestor);
+      break;
+    } catch {
+      const parent = dirname(ancestor);
+      if (parent === ancestor) {
+        realAncestor = parent;
+        break;
+      }
+      ancestor = parent;
+    }
+  }
+  if (!realAncestor.startsWith(realVault + '/') && realAncestor !== realVault) {
+    throw new Error(`Node ID escapes vault: ${nodeId}`);
+  }
+}
+
 export class VaultWriter {
   // The embedder is optional so unit tests (and any caller that only needs
   // FTS/graph writes) can construct a writer without loading the model. When
@@ -135,6 +191,10 @@ export class VaultWriter {
     const dir = opts.directory
       ? join(this.vaultPath, opts.directory)
       : this.vaultPath;
+    // Boundary check BEFORE mkdirSync (finding writer.ts:138): a recursive mkdir
+    // follows an in-vault symlinked ancestor and would create attacker/LLM-chosen
+    // directory trees OUTSIDE the vault before the post-write guard below fires.
+    assertDirCreationInVault(dir, this.vaultPath, opts.directory ?? '.');
     mkdirSync(dir, { recursive: true });
 
     const filename = `${opts.title}.md`;

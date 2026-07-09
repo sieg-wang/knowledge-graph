@@ -64,15 +64,23 @@ export function resolveLink(
   stemLookup: Map<string, string[]>,
   allPathsSet?: Set<string>,
 ): string | null {
+  // Strip Obsidian heading/block anchors ([[Note#Heading]], [[Note#^blockid]]):
+  // the '#...' subpath addresses a location WITHIN the target note, not a
+  // separate file, so it must not participate in path/stem resolution.
+  // Without this, an existing note is misclassified as unresolvable and the
+  // parser mints a phantom `_stub/Note#Heading.md` per distinct anchor instead
+  // of an edge to the real note (finding wiki-links.ts:68).
+  const filePart = raw.split('#')[0];
+
   // Path-qualified: try direct match first
-  const withMd = raw.endsWith('.md') ? raw : raw + '.md';
+  const withMd = filePart.endsWith('.md') ? filePart : filePart + '.md';
   const pathSet = allPathsSet ?? new Set([...stemLookup.values()].flat());
   if (pathSet.has(withMd)) {
     return withMd;
   }
 
   // Bare name: look up stem
-  const stem = raw.split('/').pop()!;
+  const stem = filePart.split('/').pop()!;
   const candidates = stemLookup.get(stem);
   if (!candidates || candidates.length === 0) {
     return null;  // stub node
@@ -81,9 +89,9 @@ export function resolveLink(
     return candidates[0];
   }
 
-  // Ambiguous — prefer path-qualified match if the raw includes a directory
-  if (raw.includes('/')) {
-    const match = candidates.find(c => c.startsWith(raw.replace(/\.md$/, '')));
+  // Ambiguous — prefer path-qualified match if the file part includes a directory
+  if (filePart.includes('/')) {
+    const match = candidates.find(c => c.startsWith(filePart.replace(/\.md$/, '')));
     if (match) return match;
   }
 

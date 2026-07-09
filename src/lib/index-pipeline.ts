@@ -1,4 +1,5 @@
-import { resolve } from 'path';
+import { existsSync } from 'fs';
+import { resolve, join } from 'path';
 import { parseVault } from './parser.js';
 import type { Store } from './store.js';
 import { Embedder } from './embedder.js';
@@ -27,7 +28,9 @@ export class IndexPipeline {
   // cli/index.ts:57). Keeping sync intact lets the deletion loop run while
   // force re-indexes everything; upsertSync overwrites stale mtimes so the
   // sync table still self-heals.
-  async index(vaultPath: string, resolution = 1.0, force = false): Promise<IndexStats> {
+  // `allowEmpty` bypasses the zero-files mass-deletion tripwire (below) for the
+  // rare legitimate case of intentionally emptying a vault.
+  async index(vaultPath: string, resolution = 1.0, force = false, allowEmpty = false): Promise<IndexStats> {
     const stats: IndexStats = {
       nodesIndexed: 0,
       nodesSkipped: 0,
@@ -54,6 +57,26 @@ export class IndexPipeline {
 
     const { nodes, edges, stubIds } = await parseVault(vaultPath);
     const previousPaths = this.store.getAllSyncPaths();
+
+    // Mass-deletion tripwire (finding index-pipeline.ts:148): parseVault returns
+    // 0 files not only when the vault is genuinely empty but when the vault
+    // directory exists yet is empty — a stale/unmounted mountpoint, an external
+    // volume that failed to remount, a cloud-sync dir that hasn't populated. In
+    // that window the deletion pass below would delete EVERY node/edge/embedding
+    // with no error (a missing directory aborts safely on readdir ENOENT; an
+    // existing-but-empty one does not). Refuse to wipe when the sync table shows
+    // we PREVIOUSLY indexed on-disk files here (exactly what an unmount makes
+    // vanish at once); the caller must pass allowEmpty to confirm a real
+    // full-empty. Keying on the sync table (not all store nodes) deliberately
+    // excludes writer-created ghosts, which carry no sync row and are legitimately
+    // reaped when their file is deleted.
+    if (!allowEmpty && nodes.length === 0 && previousPaths.size > 0) {
+      throw new Error(
+        `Vault ${resolvedVault} parsed 0 files but the sync table holds ${previousPaths.size} ` +
+        `previously-indexed files — refusing to wipe the store (an unmounted/empty mountpoint ` +
+        `would silently destroy the index). Pass allowEmpty to confirm a genuine full-empty.`,
+      );
+    }
 
     // Pre-group edges by source for O(1) lookup
     const edgesBySource = new Map<string, typeof edges>();
@@ -147,6 +170,15 @@ export class IndexPipeline {
     this.store.db.transaction(() => {
       for (const oldPath of deletionCandidates) {
         if (!currentPaths.has(oldPath)) {
+          // Re-verify against the live filesystem before deleting. currentPaths
+          // is the parse SNAPSHOT (built at line ~77); a node created via
+          // kg_create_node in another process during index()'s parse window is
+          // in allNodeIds() (read after the parse) but absent from the snapshot,
+          // and would be destroyed here even though its file is on disk and the
+          // creating client was told "created". A file that still exists is
+          // never a deleted file, regardless of snapshot age (finding
+          // index-pipeline.ts:73).
+          if (existsSync(join(vaultPath, oldPath))) continue;
           for (const edge of this.store.getEdgesTo(oldPath)) {
             deletedLinkSources.add(edge.sourceId);
           }
@@ -178,32 +210,47 @@ export class IndexPipeline {
     const newStubIds = new Set(stubIds);
     const resolvedStubIds: string[] = [];
     for (const id of this.store.allNodeIds()) {
-      if (id.startsWith('_stub/') && !newStubIds.has(id)) {
+      // `!currentPaths.has(id)` guards a real vault directory literally named
+      // `_stub/`: its notes get ids like `_stub/Archived Idea.md` and ARE in the
+      // current parse, so they must not be misclassified as resolved stubs and
+      // deleted every run (finding index-pipeline.ts:181). A genuine resolved
+      // stub is synthetic — never present on disk, hence never in currentPaths.
+      if (id.startsWith('_stub/') && !newStubIds.has(id) && !currentPaths.has(id)) {
         resolvedStubIds.push(id);
       }
     }
 
     if (resolvedStubIds.length > 0) {
-      const sourcesToReconcile = new Set<string>();
-      for (const stubId of resolvedStubIds) {
-        for (const edge of this.store.getEdgesTo(stubId)) {
-          // Skip sources we just re-parsed — their edges are already correct.
-          if (!justIndexed.has(edge.sourceId)) {
-            sourcesToReconcile.add(edge.sourceId);
+      // Commit the whole reconcile atomically: deleteAllEdgesFrom + the
+      // compensating re-inserts + the orphaned-stub deletes. As bare autocommit
+      // statements a throw/crash between a source's DELETE and its INSERT
+      // committed the DELETE alone — and because the stub is then deleted no
+      // later run reconciles that source again, permanently losing its edges.
+      // The wrapper mirrors the deletion transaction at line 147 and also stops
+      // a concurrent reader from observing a source with zero edges mid-rewrite
+      // (finding index-pipeline.ts:196).
+      this.store.db.transaction(() => {
+        const sourcesToReconcile = new Set<string>();
+        for (const stubId of resolvedStubIds) {
+          for (const edge of this.store.getEdgesTo(stubId)) {
+            // Skip sources we just re-parsed — their edges are already correct.
+            if (!justIndexed.has(edge.sourceId)) {
+              sourcesToReconcile.add(edge.sourceId);
+            }
           }
         }
-      }
-      for (const sourceId of sourcesToReconcile) {
-        this.store.deleteAllEdgesFrom(sourceId);
-        for (const edge of edgesBySource.get(sourceId) ?? []) {
-          this.store.insertEdge(edge);
-          stats.edgesIndexed++;
+        for (const sourceId of sourcesToReconcile) {
+          this.store.deleteAllEdgesFrom(sourceId);
+          for (const edge of edgesBySource.get(sourceId) ?? []) {
+            this.store.insertEdge(edge);
+            stats.edgesIndexed++;
+          }
         }
-      }
-      // Drop the now-orphaned stub nodes.
-      for (const stubId of resolvedStubIds) {
-        this.store.deleteNode(stubId);
-      }
+        // Drop the now-orphaned stub nodes.
+        for (const stubId of resolvedStubIds) {
+          this.store.deleteNode(stubId);
+        }
+      })();
       edgeTopologyChanged = true;
     }
 
