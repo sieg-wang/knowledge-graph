@@ -15,6 +15,7 @@ vi.mock('fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('fs')>();
   return {
     ...actual,
+    closeSync: vi.fn(actual.closeSync),
     existsSync: vi.fn(actual.existsSync),
     lstatSync: vi.fn(actual.lstatSync),
     linkSync: vi.fn(actual.linkSync),
@@ -22,6 +23,7 @@ vi.mock('fs', async (importOriginal) => {
 });
 
 import {
+  closeSync,
   existsSync,
   linkSync,
   lstatSync,
@@ -49,6 +51,7 @@ describe('VaultWriter.createNode exclusive publish', () => {
   });
 
   afterEach(() => {
+    vi.mocked(closeSync).mockReset();
     vi.mocked(existsSync).mockReset();
     vi.mocked(lstatSync).mockReset();
     vi.mocked(linkSync).mockReset();
@@ -105,6 +108,33 @@ describe('VaultWriter.createNode exclusive publish', () => {
     })).resolves.toBe('Direct Exclusive Publish.md');
 
     expect(linkSync).not.toHaveBeenCalled();
+  });
+
+  it('keeps the destination fd open through the publish identity check', async () => {
+    const actualFs = await vi.importActual<typeof import('fs')>('fs');
+    const absPath = join(tempVault, 'Pinned Publish.md');
+    let closeCount = 0;
+    let closeCountAtPublishedCheck: number | undefined;
+
+    vi.mocked(closeSync).mockImplementation((fd) => {
+      closeCount += 1;
+      actualFs.closeSync(fd);
+    });
+    vi.mocked(lstatSync).mockImplementation((path, options) => {
+      if (String(path) === absPath) {
+        closeCountAtPublishedCheck = closeCount;
+      }
+      return actualFs.lstatSync(path, options as never);
+    });
+
+    await expect(writer.createNode({
+      title: 'Pinned Publish',
+      frontmatter: {},
+      content: 'fd remains pinned until validation',
+    })).resolves.toBe('Pinned Publish.md');
+
+    expect(closeCountAtPublishedCheck).toBe(0);
+    expect(closeCount).toBe(1);
   });
 
   it('never removes a destination successor that appears after publish', async () => {

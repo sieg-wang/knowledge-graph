@@ -284,23 +284,25 @@ export class VaultWriter {
         | constants.O_EXCL
         | (constants.O_NOFOLLOW ?? 0);
       const fd = openSync(absPath, flags, 0o666);
-      let opened: { dev: number; ino: number };
       try {
         const fdStat = fstatSync(fd);
-        opened = { dev: fdStat.dev, ino: fdStat.ino };
+        const opened = { dev: fdStat.dev, ino: fdStat.ino };
         writeFileSync(fd, fileContent, 'utf-8');
         fsyncSync(fd);
+
+        // Keep the descriptor open while validating the pathname. If another
+        // writer unlinks our entry, the open fd pins its inode so a replacement
+        // cannot immediately reuse the same dev/ino pair and evade this check.
+        const published = lstatSync(absPath);
+        if (
+          published.isSymbolicLink()
+          || published.dev !== opened.dev
+          || published.ino !== opened.ino
+        ) {
+          throw new Error(`Node path changed during create: ${relPath}`);
+        }
       } finally {
         closeSync(fd);
-      }
-
-      const published = lstatSync(absPath);
-      if (
-        published.isSymbolicLink()
-        || published.dev !== opened.dev
-        || published.ino !== opened.ino
-      ) {
-        throw new Error(`Node path changed during create: ${relPath}`);
       }
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
