@@ -3,10 +3,14 @@ import {
   mkdirSync,
   readFileSync,
   writeFileSync,
-  appendFileSync,
-  linkSync,
-  unlinkSync,
   realpathSync,
+  openSync,
+  closeSync,
+  fstatSync,
+  fsyncSync,
+  lstatSync,
+  statSync,
+  constants,
 } from 'fs';
 import { join, basename, dirname, resolve } from 'path';
 import matter from 'gray-matter';
@@ -171,6 +175,57 @@ function assertDirCreationInVault(dir: string, vaultPath: string, nodeId: string
   }
 }
 
+/**
+ * Append through an identity-checked descriptor. The path is untrusted between
+ * every filesystem call: a sync client or another process can replace the
+ * checked file with a symlink or different inode before appendFileSync reopens
+ * it. O_NOFOLLOW protects the final component, while pre/open/post inode checks
+ * reject regular-file replacement and a second boundary check catches ancestor
+ * changes before any bytes are written.
+ */
+function appendFileInVault(
+  absPath: string,
+  vaultPath: string,
+  nodeId: string,
+  content: string,
+): void {
+  const before = lstatSync(absPath);
+  if (before.isSymbolicLink() || !before.isFile()) {
+    throw new Error(`Unsafe node path changed before append: ${nodeId}`);
+  }
+
+  const flags = constants.O_WRONLY
+    | constants.O_APPEND
+    | (constants.O_NOFOLLOW ?? 0);
+  const fd = openSync(absPath, flags);
+  try {
+    const opened = fstatSync(fd);
+    if (
+      !opened.isFile()
+      || opened.dev !== before.dev
+      || opened.ino !== before.ino
+    ) {
+      throw new Error(`Node path changed during append: ${nodeId}`);
+    }
+
+    assertPathInVault(absPath, vaultPath, nodeId);
+    const currentLink = lstatSync(absPath);
+    const current = statSync(absPath);
+    if (
+      currentLink.isSymbolicLink()
+      || current.dev !== opened.dev
+      || current.ino !== opened.ino
+    ) {
+      throw new Error(`Node path changed during append: ${nodeId}`);
+    }
+
+    writeFileSync(fd, content, 'utf-8');
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
 export class VaultWriter {
   // The embedder is optional so unit tests (and any caller that only needs
   // FTS/graph writes) can construct a writer without loading the model. When
@@ -217,21 +272,37 @@ export class VaultWriter {
     const fm = { title: opts.title, ...opts.frontmatter };
     const fileContent = matter.stringify(opts.content, fm);
 
-    // Atomic AND exclusive publish: write to a sibling tmp path, then linkSync
-    // it into place. Unlike renameSync (which silently REPLACES an existing
-    // destination), link(2) fails EEXIST if the final path appeared between the
-    // existsSync check above and here — closing the check-then-act race where a
-    // concurrent writer's note would be clobbered without error (finding
-    // writer.ts:144). We then unlink the tmp name; a crash between link and
-    // unlink leaves the tmp hard-link as harmless clutter (non-.md, ignored by
-    // collectMarkdownFiles) while absPath is already the complete, durable file.
-    const tmpPath = `${absPath}.tmp.${process.pid}.${Date.now()}`;
+    // Publish through an exclusively-created final-path fd. O_EXCL closes the
+    // check-then-act race without re-resolving a mutable temp pathname (link(2)
+    // does), and O_NOFOLLOW rejects a destination symlink. A failed write may
+    // leave an incomplete, identity-owned file for explicit recovery; we never
+    // unlink by pathname after failure because a concurrent writer may already
+    // have replaced that entry.
     try {
-      writeFileSync(tmpPath, fileContent, 'utf-8');
-      linkSync(tmpPath, absPath);
-      unlinkSync(tmpPath);
+      const flags = constants.O_WRONLY
+        | constants.O_CREAT
+        | constants.O_EXCL
+        | (constants.O_NOFOLLOW ?? 0);
+      const fd = openSync(absPath, flags, 0o666);
+      let opened: { dev: number; ino: number };
+      try {
+        const fdStat = fstatSync(fd);
+        opened = { dev: fdStat.dev, ino: fdStat.ino };
+        writeFileSync(fd, fileContent, 'utf-8');
+        fsyncSync(fd);
+      } finally {
+        closeSync(fd);
+      }
+
+      const published = lstatSync(absPath);
+      if (
+        published.isSymbolicLink()
+        || published.dev !== opened.dev
+        || published.ino !== opened.ino
+      ) {
+        throw new Error(`Node path changed during create: ${relPath}`);
+      }
     } catch (err) {
-      try { unlinkSync(tmpPath); } catch { /* tmp may not exist */ }
       if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
         throw new Error(`File already exists: ${relPath}`);
       }
@@ -251,7 +322,7 @@ export class VaultWriter {
       throw new Error(`Node not found: ${nodeId}`);
     }
 
-    appendFileSync(absPath, content, 'utf-8');
+    appendFileInVault(absPath, this.vaultPath, nodeId, content);
 
     // Re-index
     await this.indexFile(nodeId);
@@ -362,7 +433,7 @@ export class VaultWriter {
     // known, then re-index the source node so its record/embedding reflect
     // the new content.
     const line = `\n${context} [[${linkRef}]]`;
-    appendFileSync(absPath, line, 'utf-8');
+    appendFileInVault(absPath, this.vaultPath, sourceId, line);
     await this.indexFile(sourceId);
 
     this.store.insertEdge({
